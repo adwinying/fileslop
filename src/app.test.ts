@@ -236,7 +236,7 @@ describe('POST /w/p', () => {
     )
   })
 
-  test('rejects missing, repeated, and extra fields', async () => {
+  test('rejects missing, repeated, extra, and wrongly named fields', async () => {
     const storageRoot = await createStorageRoot()
     const app = createApp({ storageRoot, seed: 42 })
 
@@ -247,8 +247,10 @@ describe('POST /w/p', () => {
     const extra = new FormData()
     extra.set('file', new File(['one'], 'one.txt'))
     extra.set('description', 'unexpected')
+    const wrongName = new FormData()
+    wrongName.set('upload', new File(['one'], 'one.txt'))
 
-    for (const form of [missing, repeated, extra]) {
+    for (const form of [missing, repeated, extra, wrongName]) {
       const response = await app.handle(
         new Request('https://host.example/w/p', {
           method: 'POST',
@@ -257,6 +259,24 @@ describe('POST /w/p', () => {
       )
       expect(response.status).toBe(422)
     }
+
+    expect(await readdir(join(storageRoot, 'p'))).toEqual([])
+  })
+
+  test('rejects an oversized file before writing it', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot, maxUploadBytes: 4, seed: 42 })
+
+    const response = await upload(
+      app,
+      new File(['12345'], 'large.txt'),
+      'large.txt',
+      'host.example',
+    )
+
+    expect(response.status).toBe(413)
+    expect(await response.text()).toBe('Payload Too Large\n')
+    expect(await readdir(join(storageRoot, 'p'))).toEqual([])
   })
 
   test('creates namespace directories when the app is built', async () => {

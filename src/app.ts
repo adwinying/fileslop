@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { Elysia } from 'elysia'
+import { Elysia, t } from 'elysia'
 import { env } from '~/env'
 import { namespaces } from '~/namespaces'
 import { createStorage } from '~/storage'
@@ -8,12 +8,22 @@ import { createStorage } from '~/storage'
 type AppOptions = {
   storageRoot?: string
   baseUrl?: string
+  maxUploadBytes?: number
   seed?: number
+}
+
+const isOversizedUpload = (value: unknown, maxUploadBytes: number) => {
+  if (typeof value !== 'object' || value === null || !('file' in value)) {
+    return false
+  }
+
+  return value.file instanceof Blob && value.file.size > maxUploadBytes
 }
 
 export const createApp = ({
   storageRoot = env.STORAGE_ROOT,
   baseUrl = env.BASE_URL,
+  maxUploadBytes = env.MAX_UPLOAD_BYTES,
   seed,
 }: AppOptions = {}) => {
   for (const namespace of Object.values(namespaces)) {
@@ -22,31 +32,34 @@ export const createApp = ({
 
   const storeFile = createStorage({ storageRoot, seed })
 
-  return new Elysia().post('/w/p', async ({ body, request }) => {
-    if (
-      !request.headers.get('content-type')?.startsWith('multipart/form-data')
-    ) {
-      return new Response('Unprocessable Entity\n', { status: 422 })
-    }
-
-    const entries =
-      typeof body === 'object' && body !== null ? Object.entries(body) : []
-    const [entry] = entries
-
-    if (
-      entries.length !== 1 ||
-      entry?.[0] !== 'file' ||
-      !(entry[1] instanceof File)
-    ) {
-      return new Response('Unprocessable Entity\n', { status: 422 })
-    }
-
-    const filename = await storeFile(namespaces.p, entry[1])
-    const url = new URL(`/p/${filename}`, baseUrl)
-
-    return new Response(`${url.href}\n`, {
-      status: 201,
-      headers: { 'content-type': 'text/plain' },
+  return new Elysia({ normalize: false })
+    .onError(({ code, error }) => {
+      if (
+        code === 'VALIDATION' &&
+        error.type === 'body' &&
+        isOversizedUpload(error.value, maxUploadBytes)
+      ) {
+        return new Response('Payload Too Large\n', { status: 413 })
+      }
     })
-  })
+    .post(
+      '/w/p',
+      async ({ body }) => {
+        const filename = await storeFile(namespaces.p, body.file)
+        const url = new URL(`/p/${filename}`, baseUrl)
+
+        return new Response(`${url.href}\n`, {
+          status: 201,
+          headers: { 'content-type': 'text/plain' },
+        })
+      },
+      {
+        body: t.Object(
+          {
+            file: t.File({ maxSize: maxUploadBytes }),
+          },
+          { additionalProperties: false },
+        ),
+      },
+    )
 }
