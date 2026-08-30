@@ -5,7 +5,7 @@ import { Patterns, cron } from '@elysiajs/cron'
 import { Elysia, t } from 'elysia'
 import { env } from '~/env'
 import { namespaces } from '~/namespaces'
-import { createStorage } from '~/storage'
+import { createStorage, isValidStoredFilename } from '~/storage'
 import { tryTo } from '~/utils'
 
 type AppOptions = {
@@ -22,6 +22,14 @@ const isOversizedUpload = (value: unknown, maxUploadBytes: number) => {
 
   return value.file instanceof Blob && value.file.size > maxUploadBytes
 }
+
+const notFound = () =>
+  new Response('Not Found\n', {
+    status: 404,
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+    },
+  })
 
 export const createApp = ({
   storageRoot = env.STORAGE_ROOT,
@@ -85,8 +93,37 @@ export const createApp = ({
         headers: { 'content-type': 'text/plain' },
       })
     }
+  const createReadHandler =
+    (namespaceName: keyof typeof namespaces) =>
+    async ({ params }: { params: { filename: string } }) => {
+      if (!isValidStoredFilename(params.filename)) return notFound()
+
+      const namespace = namespaces[namespaceName]
+      const path = join(storageRoot, namespace.directory, params.filename)
+      const file = Bun.file(path)
+      const [fileStats, statError] = await tryTo(stat(path))
+
+      if (statError !== null || !fileStats.isFile()) return notFound()
+      if (
+        namespace.ttl !== null &&
+        Date.now() - fileStats.mtimeMs > namespace.ttl
+      ) {
+        return notFound()
+      }
+
+      // ADR-0002: preserve the stored file's extension-derived MIME type and
+      // serve it inline rather than forcing a download.
+      // Bun 1.3.9 serves the full file with 200 for Range requests. Range
+      // handling stays delegated to Bun so a runtime upgrade can change it.
+      return new Response(file, {
+        headers: {
+          'content-type': file.type || 'application/octet-stream',
+        },
+      })
+    }
 
   return new Elysia({ normalize: false })
+    .headers({ 'cache-control': 'no-store' })
     .use(
       cron({
         name: 'sweeper',
@@ -95,6 +132,8 @@ export const createApp = ({
       }),
     )
     .onError(({ code, error }) => {
+      if (code === 'NOT_FOUND') return notFound()
+
       if (
         code === 'VALIDATION' &&
         error.type === 'body' &&
@@ -107,4 +146,6 @@ export const createApp = ({
       body: uploadBody,
     })
     .post('/w/pt', createUploadHandler('pt'), { body: uploadBody })
+    .get('/p/:filename', createReadHandler('p'))
+    .get('/pt/:filename', createReadHandler('pt'))
 }

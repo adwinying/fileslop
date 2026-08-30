@@ -73,6 +73,18 @@ const deriveExtension = (name: string) => {
   return /^[a-z0-9]{1,10}$/.test(suffix) ? `.${suffix}` : ''
 }
 
+export const isValidStoredFilename = (filename: string) => {
+  if (!/^[a-zA-Z0-9]{7}/.test(filename)) return false
+
+  const extension = filename.slice(SLUG_LENGTH)
+
+  return (
+    extension === '' ||
+    COMPOUND_EXTENSIONS.includes(extension) ||
+    /^\.[a-zA-Z0-9]{1,10}$/.test(extension)
+  )
+}
+
 const isAlreadyExistsError = (error: unknown) =>
   error instanceof Error && 'code' in error && error.code === 'EEXIST'
 
@@ -95,6 +107,10 @@ export const createStorage = ({ storageRoot, seed }: StorageOptions) => {
 
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
       const filename = `${generateSlug()}${extension}`
+
+      if (!isValidStoredFilename(filename)) {
+        throw new Error(`Generated invalid stored filename: ${filename}`)
+      }
 
       const [, error] = await tryTo(
         writeExclusively(
