@@ -70,6 +70,7 @@ describe('POST /w/p', () => {
 
     expect(response.status).toBe(201)
     expect(response.headers.get('content-type')).toBe('text/plain')
+    expect(response.headers.get('cache-control')).toBe('no-store')
 
     const body = await response.text()
     expect(body).toMatch(/^https:\/\/slop\.example\/p\/[a-zA-Z0-9]{7}\.pdf\n$/)
@@ -284,6 +285,7 @@ describe('POST /w/p', () => {
     )
 
     expect(response.status).toBe(413)
+    expect(response.headers.get('cache-control')).toBe('no-store')
     expect(await response.text()).toBe('Payload Too Large\n')
     expect(await readdir(join(storageRoot, 'p'))).toEqual([])
   })
@@ -350,6 +352,183 @@ describe('POST /w/pt', () => {
       'temporary',
     )
     expect(await readdir(join(storageRoot, 'p'))).toEqual([])
+  })
+})
+
+describe('GET /p/:filename', () => {
+  test('returns the exact stored bytes', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const contents = new Uint8Array([0, 255, 1, 2, 3])
+    await Bun.write(join(storageRoot, 'p', 'aB3dE5g.bin'), contents)
+
+    const response = await app.handle(
+      new Request('https://files.example/p/aB3dE5g.bin'),
+    )
+
+    expect(response.status).toBe(200)
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(contents)
+  })
+
+  test('round trips bytes from the upload response URL', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot, seed: 42 })
+    const contents = new Uint8Array([255, 42, 1])
+    const sourcePath = join(storageRoot, 'source')
+    await Bun.write(sourcePath, contents)
+
+    const uploadResponse = await upload(
+      app,
+      Bun.file(sourcePath),
+      'image.png',
+      'files.example',
+    )
+    expect(uploadResponse.status).toBe(201)
+    const downloadResponse = await app.handle(
+      new Request((await uploadResponse.text()).trim()),
+    )
+
+    expect(downloadResponse.status).toBe(200)
+    expect(new Uint8Array(await downloadResponse.arrayBuffer())).toEqual(
+      contents,
+    )
+  })
+
+  test('sets the extension MIME type and disables caching', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    await Bun.write(join(storageRoot, 'p', 'aB3dE5g.png'), 'image')
+
+    const response = await app.handle(
+      new Request('https://files.example/p/aB3dE5g.png'),
+    )
+
+    expect(response.headers.get('content-type')).toBe('image/png')
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('content-disposition')).toBeNull()
+    expect(response.headers.get('etag')).toBeNull()
+    expect(response.headers.get('last-modified')).toBeNull()
+  })
+
+  test.each([
+    ['aB3dE5g', 'application/octet-stream'],
+    ['aB3dE5g.unknown', 'application/octet-stream'],
+  ])('uses the fallback MIME type for %s', async (filename, contentType) => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    await Bun.write(join(storageRoot, 'p', filename), 'contents')
+
+    const response = await app.handle(
+      new Request(`https://files.example/p/${filename}`),
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe(contentType)
+  })
+
+  test('serves a filename with an allowed compound extension', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    await Bun.write(join(storageRoot, 'p', 'aB3dE5g.tar.gz'), 'archive')
+
+    const response = await app.handle(
+      new Request('https://files.example/p/aB3dE5g.tar.gz'),
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe('application/gzip')
+    expect(await response.text()).toBe('archive')
+  })
+
+  test.each([
+    'missing',
+    '..',
+    'short.txt',
+    'aB3dE5g%2Fsecret.txt',
+    'aB3dE5g.bad-suffix',
+  ])('returns the same non-cacheable miss for %s', async (filename) => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+
+    const response = await app.handle(
+      new Request(`https://files.example/p/${filename}`),
+    )
+
+    expect(response.status).toBe(404)
+    expect(await response.text()).toBe('Not Found\n')
+    expect(response.headers.get('content-type')).toStartWith('text/plain')
+    expect(response.headers.get('cache-control')).toBe('no-store')
+  })
+
+  test('returns the same miss for an absent namespace directory and a non-file', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    await mkdir(join(storageRoot, 'p', 'aB3dE5g.txt'))
+
+    const directoryResponse = await app.handle(
+      new Request('https://files.example/p/aB3dE5g.txt'),
+    )
+    await rm(join(storageRoot, 'p'), { recursive: true })
+    const absentResponse = await app.handle(
+      new Request('https://files.example/p/aB3dE5g.txt'),
+    )
+
+    for (const response of [directoryResponse, absentResponse]) {
+      expect(response.status).toBe(404)
+      expect(await response.text()).toBe('Not Found\n')
+      expect(response.headers.get('cache-control')).toBe('no-store')
+    }
+  })
+})
+
+describe('GET /pt/:filename', () => {
+  test('returns a miss for an expired file without deleting it', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const path = join(storageRoot, 'pt', 'aB3dE5g.txt')
+    const ttl = (await import('~/namespaces')).namespaces.pt.ttl
+    await Bun.write(path, 'expired')
+    await utimes(path, 0, new Date(Date.now() - ttl - 10_000))
+
+    const response = await app.handle(
+      new Request('https://files.example/pt/aB3dE5g.txt'),
+    )
+
+    expect(response.status).toBe(404)
+    expect(await response.text()).toBe('Not Found\n')
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect((await stat(path)).isFile()).toBe(true)
+  })
+
+  test('serves a file just inside its TTL', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const path = join(storageRoot, 'pt', 'aB3dE5g.txt')
+    const ttl = (await import('~/namespaces')).namespaces.pt.ttl
+    await Bun.write(path, 'temporary')
+    await utimes(path, 0, new Date(Date.now() - ttl + 10_000))
+
+    const response = await app.handle(
+      new Request('https://files.example/pt/aB3dE5g.txt'),
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('temporary')
+  })
+
+  test('serves a permanent file regardless of age', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const path = join(storageRoot, 'p', 'aB3dE5g.txt')
+    await Bun.write(path, 'permanent')
+    await utimes(path, 0, 0)
+
+    const response = await app.handle(
+      new Request('https://files.example/p/aB3dE5g.txt'),
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('permanent')
   })
 })
 
