@@ -33,3 +33,4 @@ The tunnel is configured to route only the read paths. `/w/*` has no ingress rul
 - **The origin must be unreachable except through the tunnel.** Since the application authenticates nobody, a direct origin request bypasses Access entirely and returns restricted files. Run `cloudflared` with no inbound public port.
 - Agents fetching `/r/:filename` need Access **service tokens** (`CF-Access-Client-Id` / `CF-Access-Client-Secret`). Browser SSO does not work for `curl`.
 - Anyone who reaches the process can write to it. The deployment must never expose the listening port beyond the tailnet.
+- The Cloudflare configuration this decision depends on is created and checked by fileslop itself — see ADR-0004. That does not change the decision here: the application still authenticates nobody at request time.
