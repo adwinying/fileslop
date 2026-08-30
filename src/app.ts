@@ -6,6 +6,7 @@ import { Elysia, t } from 'elysia'
 import { env } from '~/env'
 import { namespaces } from '~/namespaces'
 import { createStorage } from '~/storage'
+import { tryTo } from '~/utils'
 
 type AppOptions = {
   storageRoot?: string
@@ -42,34 +43,28 @@ export const createApp = ({
       }
 
       const directory = join(storageRoot, namespace.directory)
-      let entries: string[]
+      const [entries, readdirError] = await tryTo(readdir(directory))
 
-      try {
-        entries = await readdir(directory)
-      } catch (error) {
-        if (
-          error instanceof Error &&
-          'code' in error &&
-          error.code === 'ENOENT'
-        ) {
-          continue
-        }
-
-        throw error
+      if (readdirError !== null) {
+        if ('code' in readdirError && readdirError.code === 'ENOENT') continue
+        throw readdirError
       }
 
       for (const entry of entries.sort()) {
         const path = join(directory, entry)
+        const [entryStats, statError] = await tryTo(stat(path))
 
-        try {
-          const { mtimeMs } = await stat(path)
-
-          if (now - mtimeMs > namespace.ttl) {
-            await unlink(path)
-          }
-        } catch (error) {
-          console.error(`Failed to sweep ${path}`, error)
+        if (statError !== null) {
+          console.error(`Failed to sweep ${path}`, statError)
+          continue
         }
+
+        if (now - entryStats.mtimeMs <= namespace.ttl) continue
+
+        const [, unlinkError] = await tryTo(unlink(path))
+
+        if (unlinkError !== null)
+          console.error(`Failed to sweep ${path}`, unlinkError)
       }
     }
   }
