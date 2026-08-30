@@ -15,6 +15,14 @@ export const namespaces = {
     directory: 'pt',
     ttl: env.TEMP_TTL,
   },
+  r: {
+    directory: 'r',
+    ttl: null,
+  },
+  rt: {
+    directory: 'rt',
+    ttl: env.TEMP_TTL,
+  },
 } as const satisfies Record<string, Namespace>
 
 export const isExpired = (namespace: Namespace, fileStats: Stats) =>
