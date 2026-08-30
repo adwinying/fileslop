@@ -1,0 +1,43 @@
+diff --git a/node_modules/eslint-plugin-no-relative-import-paths/.bun-tag-83d4d1e54ec887cc b/.bun-tag-83d4d1e54ec887cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/index.js b/index.js
+index 709991da99b8b5cd9c5f4d81774d874da087a20c..8196b14a7d318b4124e1cd946591b69e4e4b193d 100644
+--- a/index.js
++++ b/index.js
+@@ -1,13 +1,21 @@
+ const path = require("path");
+ 
++function getCwd(context) {
++  return typeof context.getCwd === 'function' ? context.getCwd() : context.cwd;
++}
++
++function getFilename(context) {
++  return typeof context.getFilename === 'function' ? context.getFilename() : context.filename;
++}
++
+ function isParentFolder(relativeFilePath, context, rootDir) {
+-  const absoluteRootPath = path.join(context.getCwd(), rootDir);
+-  const absoluteFilePath = path.join(path.dirname(context.getFilename()), relativeFilePath)
++  const absoluteRootPath = path.join(getCwd(context), rootDir);
++  const absoluteFilePath = path.join(path.dirname(getFilename(context)), relativeFilePath)
+ 
+   return relativeFilePath.startsWith("../") && (
+     rootDir === '' ||
+     (absoluteFilePath.startsWith(absoluteRootPath) &&
+-      context.getFilename().startsWith(absoluteRootPath))
++      getFilename(context).startsWith(absoluteRootPath))
+   );
+ }
+ 
+@@ -29,8 +37,8 @@ function getAbsolutePath(relativePath, context, rootDir, prefix) {
+     prefix,
+     ...path
+       .relative(
+-        path.join(context.getCwd(), rootDir),
+-        path.join(path.dirname(context.getFilename()), relativePath)
++        path.join(getCwd(context), rootDir),
++        path.join(path.dirname(getFilename(context)), relativePath)
+       )
+       .split(path.sep)
+   ].filter(String).join("/");
