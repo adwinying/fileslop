@@ -40,6 +40,8 @@ POST /w/rt         PUT /w/rt/:filename         GET /rt/:filename
 
 How long a file in a temporary namespace (`pt`, `rt`) survives. Measured from the file's mtime. There is no sidecar metadata and no database.
 
+Because it is measured from mtime, overwriting a file restarts its TTL. This is intended: an overwrite is a fresh file that kept its name. It follows that a file which has expired but not yet been swept can be overwritten back into existence.
+
 ### Sweeper
 
 The scheduled job that deletes files past their TTL. Runs hourly.

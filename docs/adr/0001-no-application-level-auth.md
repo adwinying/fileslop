@@ -1,6 +1,6 @@
 # ADR-0001: No application-level authentication
 
-**Status:** Accepted
+**Status:** Accepted, amended — the original decision filtered methods with a WAF custom rule. That rule was never deployed; tunnel ingress now omits the write paths entirely, which fails closed rather than open.
 
 ## Context
 
@@ -23,13 +23,13 @@ Access control is entirely infrastructural, and is made expressible by moving ev
 
 Cloudflare Access applications are created for `/r/*` and `/rt/*` only. `/p/*` and `/pt/*` are left uncovered rather than given a public Bypass policy; an uncovered path is unprotected by default, which is simpler and has fewer ways to misconfigure.
 
-A WAF custom rule on the public hostname rejects every method except `GET` and `HEAD`.
+The tunnel is configured to route only the read paths. `/w/*` has no ingress rule and never resolves through it, so writes are unreachable from the internet rather than filtered there.
 
 ## Consequences
 
 - Adding a namespace requires no new access rules. `/w/*` already covers its writes.
 - The single `/w/` prefix does not depend on how Access resolves prefix-vs-exact path matching, a question the documentation does not settle clearly. A disjoint prefix is correct either way.
-- **This configuration fails open.** Two hostnames would fail closed — writes unreachable because no DNS record points at them. With one hostname, deleting the WAF rule exposes every write endpoint to the internet. The WAF rule is load-bearing, not defence in depth.
+- **This configuration fails closed**, for the same reason two hostnames would: writes are unreachable because nothing routes to them, not because a rule rejects them. An ingress config that omits `/w/*` cannot be partially deleted into an exposed state the way a method-filtering rule can.
 - **The origin must be unreachable except through the tunnel.** Since the application authenticates nobody, a direct origin request bypasses Access entirely and returns restricted files. Run `cloudflared` with no inbound public port.
 - Agents fetching `/r/:filename` need Access **service tokens** (`CF-Access-Client-Id` / `CF-Access-Client-Secret`). Browser SSO does not work for `curl`.
 - Anyone who reaches the process can write to it. The deployment must never expose the listening port beyond the tailnet.
