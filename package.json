@@ -2,12 +2,14 @@
   "name": "fileslop",
   "version": "1.0.50",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "bun test",
     "dev": "bun run --watch src/index.ts",
     "lint": "tsc --noEmit && eslint . --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
-    "elysia": "latest"
+    "@t3-oss/env-core": "^0.13.11",
+    "elysia": "latest",
+    "zod": "^4.5.4"
   },
   "patchedDependencies": {
     "eslint-plugin-no-relative-import-paths@1.6.1": "patches/eslint-plugin-no-relative-import-paths@1.6.1.patch"
