@@ -194,6 +194,7 @@ export const createApp = ({
     })
     .post('/w/pt', createUploadHandler('pt'), { body: uploadBody })
     .put('/w/p/:filename', createReplaceHandler('p'), { body: uploadBody })
+    .put('/w/pt/:filename', createReplaceHandler('pt'), { body: uploadBody })
     .get('/p/:filename', createReadHandler('p'))
     .get('/pt/:filename', createReadHandler('pt'))
 }
