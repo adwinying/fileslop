@@ -55,7 +55,7 @@ describe('POST /w/p', () => {
     const response = await upload(
       app,
       Bun.file(sourcePath),
-      'Quarterly.Report.PDF',
+      'report.PDF',
       'spoofed.example',
     )
 
@@ -71,6 +71,84 @@ describe('POST /w/p', () => {
     expect(
       new Uint8Array(await readFile(join(storageRoot, 'p', filename!))),
     ).toEqual(contents)
+  })
+
+  test('preserves an allowed compound extension', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot, seed: 42 })
+
+    const response = await upload(
+      app,
+      new File(['archive'], 'archive.tar.gz'),
+      'archive.tar.gz',
+      'host.example',
+    )
+
+    expect(response.status).toBe(201)
+    const body = await response.text()
+    expect(body).toMatch(
+      /^https:\/\/files\.example\/p\/[a-zA-Z0-9]{7}\.tar\.gz\n$/,
+    )
+
+    const filename = new URL(body.trim()).pathname.split('/').pop()
+    expect(filename).toBeDefined()
+    expect(await readFile(join(storageRoot, 'p', filename!), 'utf8')).toBe(
+      'archive',
+    )
+  })
+
+  test('does not treat a dotfile name as an extension', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot, seed: 42 })
+
+    const response = await upload(
+      app,
+      new File(['shell'], '.bashrc'),
+      '.bashrc',
+      'host.example',
+    )
+
+    expect(response.status).toBe(201)
+    const body = await response.text()
+    expect(body).toMatch(/^https:\/\/files\.example\/p\/[a-zA-Z0-9]{7}\n$/)
+
+    const filename = new URL(body.trim()).pathname.split('/').pop()
+    expect(filename).toBeDefined()
+    expect(await readFile(join(storageRoot, 'p', filename!), 'utf8')).toBe(
+      'shell',
+    )
+  })
+
+  test.each([
+    ['Makefile', ''],
+    ['my.report.final.png', '.png'],
+    ['document.abcdefghijk', ''],
+    ['document.bad-suffix', ''],
+  ])('derives the extension from %s', async (originalName, extension) => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot, seed: 42 })
+
+    const response = await upload(
+      app,
+      new File(['contents'], originalName),
+      originalName,
+      'host.example',
+    )
+
+    expect(response.status).toBe(201)
+    const body = await response.text()
+    const escapedExtension = extension.replace('.', '\\.')
+    expect(body).toMatch(
+      new RegExp(
+        `^https://files\\.example/p/[a-zA-Z0-9]{7}${escapedExtension}\\n$`,
+      ),
+    )
+
+    const filename = new URL(body.trim()).pathname.split('/').pop()
+    expect(filename).toBeDefined()
+    expect(await readFile(join(storageRoot, 'p', filename!), 'utf8')).toBe(
+      'contents',
+    )
   })
 
   test('rejects missing, repeated, and extra fields', async () => {

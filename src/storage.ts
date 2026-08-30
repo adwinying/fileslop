@@ -5,6 +5,7 @@ const ALPHABET =
   'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
 const SLUG_LENGTH = 7
 const MAX_UNBIASED_BYTE = 248
+const COMPOUND_EXTENSIONS = ['.tar.gz', '.tar.bz2', '.tar.xz', '.tar.zst']
 
 type StorageOptions = {
   storageRoot: string
@@ -54,9 +55,16 @@ const createSlugGenerator = (seed?: number) => {
 }
 
 const deriveExtension = (name: string) => {
+  const lowerName = name.toLowerCase()
+  const compoundExtension = COMPOUND_EXTENSIONS.find((extension) =>
+    lowerName.endsWith(extension),
+  )
+
+  if (compoundExtension !== undefined) return compoundExtension
+
   const separator = name.lastIndexOf('.')
 
-  if (separator === -1) return ''
+  if (separator <= 0) return ''
 
   const suffix = name.slice(separator + 1).toLowerCase()
   return /^[a-z0-9]{1,10}$/.test(suffix) ? `.${suffix}` : ''
