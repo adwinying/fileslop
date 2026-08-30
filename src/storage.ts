@@ -1,6 +1,7 @@
 import type { Namespace } from '~/namespaces'
 import { open } from 'node:fs/promises'
 import { join } from 'node:path'
+import { tryTo } from '~/utils'
 
 const ALPHABET =
   'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
@@ -95,15 +96,15 @@ export const createStorage = ({ storageRoot, seed }: StorageOptions) => {
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
       const filename = `${generateSlug()}${extension}`
 
-      try {
-        await writeExclusively(
+      const [, error] = await tryTo(
+        writeExclusively(
           join(storageRoot, namespace.directory, filename),
           contents,
-        )
-        return filename
-      } catch (error) {
-        if (!isAlreadyExistsError(error)) throw error
-      }
+        ),
+      )
+
+      if (error === null) return filename
+      if (!isAlreadyExistsError(error)) throw error
     }
 
     throw new Error(`Could not store file after ${MAX_WRITE_ATTEMPTS} attempts`)
