@@ -46,7 +46,7 @@ const replace = (
   filename: string,
   file: Blob,
   originalName: string,
-  namespace: 'p' | 'pt' = 'p',
+  namespace: 'p' | 'pt' | 'r' | 'rt' = 'p',
 ) => {
   const form = new FormData()
   form.set('file', file, originalName)
@@ -313,7 +313,11 @@ describe('POST /w/p', () => {
 
     createApp({ storageRoot, seed: 42 })
 
-    expect((await stat(join(storageRoot, 'p'))).isDirectory()).toBe(true)
+    for (const namespace of ['p', 'pt', 'r', 'rt']) {
+      expect((await stat(join(storageRoot, namespace))).isDirectory()).toBe(
+        true,
+      )
+    }
   })
 
   test('produces repeatable slugs only when seeded', async () => {
@@ -370,6 +374,41 @@ describe('POST /w/pt', () => {
       'temporary',
     )
     expect(await readdir(join(storageRoot, 'p'))).toEqual([])
+  })
+})
+
+describe.each(['r', 'rt'] as const)('POST /w/%s', (namespace) => {
+  test(`stores the file in ${namespace} and returns its URL`, async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({
+      storageRoot,
+      baseUrl: 'https://slop.example/base/path',
+      seed: 42,
+    })
+    const form = new FormData()
+    form.set('file', new File(['restricted'], 'report.PDF'))
+
+    const response = await app.handle(
+      new Request(`https://spoofed.example/w/${namespace}`, {
+        method: 'POST',
+        body: form,
+      }),
+    )
+
+    expect(response.status).toBe(201)
+    expect(response.headers.get('content-type')).toBe('text/plain')
+    const body = await response.text()
+    expect(body).toMatch(
+      new RegExp(
+        `^https://slop\\.example/${namespace}/[a-zA-Z0-9]{7}\\.pdf\\n$`,
+      ),
+    )
+
+    const filename = new URL(body.trim()).pathname.split('/').pop()
+    expect(filename).toBeDefined()
+    expect(
+      await readFile(join(storageRoot, namespace, filename!), 'utf8'),
+    ).toBe('restricted')
   })
 })
 
@@ -643,6 +682,38 @@ describe('PUT /w/pt/:filename', () => {
   })
 })
 
+describe.each(['r', 'rt'] as const)('PUT /w/%s/:filename', (namespace) => {
+  test(`replaces an existing ${namespace} file and returns its URL`, async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({
+      storageRoot,
+      baseUrl: 'https://slop.example/base/path',
+    })
+    const filename = 'aB3dE5g.txt'
+    const path = join(storageRoot, namespace, filename)
+    const oldMtime = Date.now() - 60_000
+    await Bun.write(path, 'old')
+    await utimes(path, 0, new Date(oldMtime))
+
+    const response = await replace(
+      app,
+      filename,
+      new Blob(['replacement']),
+      'replacement.txt',
+      namespace,
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe(
+      `https://slop.example/${namespace}/aB3dE5g.txt\n`,
+    )
+    expect(await readFile(path, 'utf8')).toBe('replacement')
+    if (namespace === 'rt') {
+      expect((await stat(path)).mtimeMs).toBeGreaterThan(oldMtime)
+    }
+  })
+})
+
 describe('GET /p/:filename', () => {
   test('returns the exact stored bytes', async () => {
     const storageRoot = await createStorageRoot()
@@ -820,6 +891,44 @@ describe('GET /pt/:filename', () => {
   })
 })
 
+describe('GET /r/:filename', () => {
+  test('serves a restricted file regardless of age', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const path = join(storageRoot, 'r', 'aB3dE5g.txt')
+    await Bun.write(path, 'restricted')
+    await utimes(path, 0, 0)
+
+    const response = await app.handle(
+      new Request('https://files.example/r/aB3dE5g.txt'),
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(await response.text()).toBe('restricted')
+  })
+})
+
+describe('GET /rt/:filename', () => {
+  test('returns a miss for an expired restricted file', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const path = join(storageRoot, 'rt', 'aB3dE5g.txt')
+    const ttl = (await import('~/namespaces')).namespaces.rt.ttl
+    await Bun.write(path, 'expired')
+    await utimes(path, 0, new Date(Date.now() - ttl - 10_000))
+
+    const response = await app.handle(
+      new Request('https://files.example/rt/aB3dE5g.txt'),
+    )
+
+    expect(response.status).toBe(404)
+    expect(await response.text()).toBe('Not Found\n')
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect((await stat(path)).isFile()).toBe(true)
+  })
+})
+
 describe('sweeper', () => {
   test('deletes expired temporary files and keeps newer and permanent files', async () => {
     const storageRoot = await createStorageRoot()
@@ -966,6 +1075,20 @@ describe('namespaces', () => {
   test('declares pt as a temporary namespace', async () => {
     expect((await import('~/namespaces')).namespaces.pt).toEqual({
       directory: 'pt',
+      ttl: 24 * 60 * 60 * 1000,
+    })
+  })
+
+  test('declares r as a permanent namespace', async () => {
+    expect((await import('~/namespaces')).namespaces.r).toEqual({
+      directory: 'r',
+      ttl: null,
+    })
+  })
+
+  test('declares rt as a temporary namespace', async () => {
+    expect((await import('~/namespaces')).namespaces.rt).toEqual({
+      directory: 'rt',
       ttl: 24 * 60 * 60 * 1000,
     })
   })

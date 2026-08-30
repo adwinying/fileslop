@@ -193,8 +193,14 @@ export const createApp = ({
       body: uploadBody,
     })
     .post('/w/pt', createUploadHandler('pt'), { body: uploadBody })
+    .post('/w/r', createUploadHandler('r'), { body: uploadBody })
+    .post('/w/rt', createUploadHandler('rt'), { body: uploadBody })
     .put('/w/p/:filename', createReplaceHandler('p'), { body: uploadBody })
     .put('/w/pt/:filename', createReplaceHandler('pt'), { body: uploadBody })
+    .put('/w/r/:filename', createReplaceHandler('r'), { body: uploadBody })
+    .put('/w/rt/:filename', createReplaceHandler('rt'), { body: uploadBody })
     .get('/p/:filename', createReadHandler('p'))
     .get('/pt/:filename', createReadHandler('pt'))
+    .get('/r/:filename', createReadHandler('r'))
+    .get('/rt/:filename', createReadHandler('rt'))
 }
