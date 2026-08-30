@@ -12,6 +12,7 @@ type AppOptions = {
   storageRoot?: string
   baseUrl?: string
   maxUploadBytes?: number
+  logRequests?: boolean
   seed?: number
 }
 
@@ -35,6 +36,7 @@ export const createApp = ({
   storageRoot = env.STORAGE_ROOT,
   baseUrl = env.BASE_URL,
   maxUploadBytes = env.MAX_UPLOAD_BYTES,
+  logRequests = false,
   seed,
 }: AppOptions = {}) => {
   for (const namespace of Object.values(namespaces)) {
@@ -124,6 +126,19 @@ export const createApp = ({
 
   return new Elysia({ normalize: false })
     .headers({ 'cache-control': 'no-store' })
+    .derive(() => ({ startedAt: Date.now() }))
+    .onAfterResponse(({ request, set, responseValue, startedAt }) => {
+      if (!logRequests) return
+
+      // Handlers return raw Responses, so `set.status` never sees their status.
+      const status =
+        responseValue instanceof Response ? responseValue.status : set.status
+      const { pathname } = new URL(request.url)
+
+      console.log(
+        `${new Date(startedAt).toISOString()} ${request.method} ${pathname} ${status} ${Date.now() - startedAt}ms`,
+      )
+    })
     .use(
       cron({
         name: 'sweeper',

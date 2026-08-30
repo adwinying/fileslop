@@ -623,27 +623,35 @@ describe('sweeper', () => {
 
 describe('configuration', () => {
   test('fails at import time when BASE_URL is missing', async () => {
-    const process = Bun.spawn(['bun', '-e', "import './src/env.ts'"], {
-      cwd: import.meta.dir.replace(/\/src$/, ''),
-      env: {
-        PATH: Bun.env.PATH ?? '',
+    // --env-file=/dev/null stops Bun from loading the repo's .env into the
+    // spawned process, so it only sees the env passed below.
+    const process = Bun.spawn(
+      ['bun', '--env-file=/dev/null', '-e', "import './src/env.ts'"],
+      {
+        cwd: import.meta.dir.replace(/\/src$/, ''),
+        env: {
+          PATH: Bun.env.PATH ?? '',
+        },
+        stderr: 'pipe',
       },
-      stderr: 'pipe',
-    })
+    )
 
     expect(await process.exited).not.toBe(0)
     expect(await new Response(process.stderr).text()).toContain('BASE_URL')
   })
 
   test('rejects a non-HTTP BASE_URL at import time', async () => {
-    const process = Bun.spawn(['bun', '-e', "import './src/env.ts'"], {
-      cwd: import.meta.dir.replace(/\/src$/, ''),
-      env: {
-        BASE_URL: 'mailto:ops@example.com',
-        PATH: Bun.env.PATH ?? '',
+    const process = Bun.spawn(
+      ['bun', '--env-file=/dev/null', '-e', "import './src/env.ts'"],
+      {
+        cwd: import.meta.dir.replace(/\/src$/, ''),
+        env: {
+          BASE_URL: 'mailto:ops@example.com',
+          PATH: Bun.env.PATH ?? '',
+        },
+        stderr: 'pipe',
       },
-      stderr: 'pipe',
-    })
+    )
 
     expect(await process.exited).not.toBe(0)
     expect(await new Response(process.stderr).text()).toContain('BASE_URL')
