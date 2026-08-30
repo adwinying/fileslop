@@ -7,6 +7,7 @@
     "lint": "tsc --noEmit && eslint . --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
+    "@elysiajs/cron": "^1.4.2",
     "@t3-oss/env-core": "^0.13.11",
     "elysia": "latest",
     "zod": "^4.5.4"
