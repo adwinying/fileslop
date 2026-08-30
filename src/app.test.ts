@@ -41,6 +41,23 @@ const upload = (
   )
 }
 
+const replace = (
+  app: ReturnType<typeof createApp>,
+  filename: string,
+  file: Blob,
+  originalName: string,
+) => {
+  const form = new FormData()
+  form.set('file', file, originalName)
+
+  return app.handle(
+    new Request(`https://spoofed.example/w/p/${filename}`, {
+      method: 'PUT',
+      body: form,
+    }),
+  )
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories
@@ -352,6 +369,162 @@ describe('POST /w/pt', () => {
       'temporary',
     )
     expect(await readdir(join(storageRoot, 'p'))).toEqual([])
+  })
+})
+
+describe('PUT /w/p/:filename', () => {
+  test('atomically replaces an existing file and returns its public URL', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({
+      storageRoot,
+      baseUrl: 'https://slop.example/base/path',
+    })
+    const filename = 'aB3dE5g.bin'
+    const path = join(storageRoot, 'p', filename)
+    const sourcePath = join(storageRoot, 'source.bin')
+    const contents = new Uint8Array([255, 2, 3, 4])
+    await Bun.write(path, new Uint8Array([1, 1, 1]))
+    await Bun.write(sourcePath, contents)
+
+    const response = await replace(
+      app,
+      filename,
+      Bun.file(sourcePath),
+      'replacement.bin',
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe('text/plain')
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(await response.text()).toBe('https://slop.example/p/aB3dE5g.bin\n')
+    expect(new Uint8Array(await readFile(path))).toEqual(contents)
+    expect((await readdir(join(storageRoot, 'p'))).sort()).toEqual([filename])
+  })
+
+  test('returns 404 without writing when the target does not exist', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+
+    const response = await replace(
+      app,
+      'aB3dE5g.txt',
+      new Blob(['replacement']),
+      'replacement.txt',
+    )
+
+    expect(response.status).toBe(404)
+    expect(await response.text()).toBe('Not Found\n')
+    expect(await readdir(join(storageRoot, 'p'))).toEqual([])
+  })
+
+  test('returns 409 with both extensions and leaves the target untouched', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const filename = 'aB3dE5g.pdf'
+    const path = join(storageRoot, 'p', filename)
+    const original = new Uint8Array([0, 1, 255])
+    await Bun.write(path, original)
+
+    const response = await replace(
+      app,
+      filename,
+      new Blob(['replacement']),
+      'replacement.txt',
+    )
+
+    expect(response.status).toBe(409)
+    expect(response.headers.get('content-type')).toStartWith('text/plain')
+    expect(await response.text()).toBe(
+      'Extension mismatch: target .pdf, uploaded .txt\n',
+    )
+    expect(new Uint8Array(await readFile(path))).toEqual(original)
+    expect(await readdir(join(storageRoot, 'p'))).toEqual([filename])
+  })
+
+  test.each(['short.txt', 'aB3dE5g.abcdefghijk', 'aB3dE5g%2Fsecret.txt'])(
+    'returns 404 for malformed target %s',
+    async (filename) => {
+      const storageRoot = await createStorageRoot()
+      const app = createApp({ storageRoot })
+      await Bun.write(join(storageRoot, 'p', 'aB3dE5g.txt'), 'existing')
+
+      const response = await replace(
+        app,
+        filename,
+        new Blob(['replacement']),
+        'replacement.txt',
+      )
+
+      expect(response.status).toBe(404)
+      expect(await response.text()).toBe('Not Found\n')
+      expect(await readdir(join(storageRoot, 'p'))).toEqual(['aB3dE5g.txt'])
+    },
+  )
+
+  test.each([
+    ['aB3dE5g', 'Makefile'],
+    ['aB3dE5g.pdf', 'report.PDF'],
+    ['aB3dE5g.tar.gz', 'backup.tar.gz'],
+  ])('matches the extension of %s with %s', async (filename, originalName) => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const path = join(storageRoot, 'p', filename)
+    await Bun.write(path, 'existing')
+
+    const response = await replace(
+      app,
+      filename,
+      new Blob(['replacement']),
+      originalName,
+    )
+
+    expect(response.status).toBe(200)
+    expect(await readFile(path, 'utf8')).toBe('replacement')
+    expect(await readdir(join(storageRoot, 'p'))).toEqual([filename])
+  })
+
+  test('rejects an oversized upload before touching the target', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot, maxUploadBytes: 4 })
+    const filename = 'aB3dE5g.txt'
+    const path = join(storageRoot, 'p', filename)
+    await Bun.write(path, 'old')
+
+    const response = await replace(
+      app,
+      filename,
+      new Blob(['12345']),
+      'large.txt',
+    )
+
+    expect(response.status).toBe(413)
+    expect(await response.text()).toBe('Payload Too Large\n')
+    expect(await readFile(path, 'utf8')).toBe('old')
+    expect(await readdir(join(storageRoot, 'p'))).toEqual([filename])
+  })
+
+  test('rejects a missing or wrongly named file field', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const filename = 'aB3dE5g.txt'
+    const path = join(storageRoot, 'p', filename)
+    await Bun.write(path, 'old')
+    const missing = new FormData()
+    const wrongName = new FormData()
+    wrongName.set('upload', new File(['replacement'], 'replacement.txt'))
+
+    for (const form of [missing, wrongName]) {
+      const response = await app.handle(
+        new Request(`https://files.example/w/p/${filename}`, {
+          method: 'PUT',
+          body: form,
+        }),
+      )
+
+      expect(response.status).toBe(422)
+      expect(await readFile(path, 'utf8')).toBe('old')
+      expect(await readdir(join(storageRoot, 'p'))).toEqual([filename])
+    }
   })
 })
 

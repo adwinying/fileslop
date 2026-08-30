@@ -40,11 +40,15 @@ POST /w/rt         PUT /w/rt/:filename         GET /rt/:filename
 
 How long a file in a temporary namespace (`pt`, `rt`) survives. Measured from the file's mtime. There is no sidecar metadata and no database.
 
-Because it is measured from mtime, overwriting a file restarts its TTL. This is intended: an overwrite is a fresh file that kept its name. It follows that a file which has expired but not yet been swept can be overwritten back into existence.
+Because it is measured from mtime, overwriting a file restarts its TTL. This is intended: an overwrite is a fresh file that kept its name.
+
+### Expired
+
+A file is expired once it is older than its namespace's TTL. Expiry is what ends a file's life, not the sweep that follows it: an expired file is treated as absent by every endpoint, whether or not it is still on disk. It cannot be read, and it cannot be overwritten back into existence.
 
 ### Sweeper
 
-The scheduled job that deletes files past their TTL. Runs hourly.
+The scheduled job that reclaims the disk space of expired files. Runs hourly. It is not what makes a file expire — it only catches up with expiry that has already happened.
 
 ## Configuration
 

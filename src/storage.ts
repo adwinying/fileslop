@@ -1,6 +1,7 @@
 import type { Namespace } from '~/namespaces'
-import { open } from 'node:fs/promises'
+import { open, rename, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
+import { isExpired } from '~/namespaces'
 import { tryTo } from '~/utils'
 
 const ALPHABET =
@@ -88,6 +89,9 @@ export const isValidStoredFilename = (filename: string) => {
 const isAlreadyExistsError = (error: unknown) =>
   error instanceof Error && 'code' in error && error.code === 'EEXIST'
 
+const isNotFoundError = (error: unknown) =>
+  error instanceof Error && 'code' in error && error.code === 'ENOENT'
+
 const writeExclusively = async (path: string, contents: ArrayBuffer) => {
   const handle = await open(path, 'wx')
 
@@ -100,8 +104,10 @@ const writeExclusively = async (path: string, contents: ArrayBuffer) => {
 
 export const createStorage = ({ storageRoot, seed }: StorageOptions) => {
   const generateSlug = createSlugGenerator(seed)
+  const namespacePath = (namespace: Namespace, filename: string) =>
+    join(storageRoot, namespace.directory, filename)
 
-  return async (namespace: Namespace, file: File) => {
+  const store = async (namespace: Namespace, file: File) => {
     const extension = deriveExtension(file.name)
     const contents = await file.arrayBuffer()
 
@@ -113,10 +119,7 @@ export const createStorage = ({ storageRoot, seed }: StorageOptions) => {
       }
 
       const [, error] = await tryTo(
-        writeExclusively(
-          join(storageRoot, namespace.directory, filename),
-          contents,
-        ),
+        writeExclusively(namespacePath(namespace, filename), contents),
       )
 
       if (error === null) return filename
@@ -125,4 +128,61 @@ export const createStorage = ({ storageRoot, seed }: StorageOptions) => {
 
     throw new Error(`Could not store file after ${MAX_WRITE_ATTEMPTS} attempts`)
   }
+
+  const replace = async (
+    namespace: Namespace,
+    filename: string,
+    file: File,
+  ) => {
+    const targetPath = namespacePath(namespace, filename)
+    const [targetStats, statError] = await tryTo(stat(targetPath))
+
+    if (statError !== null) {
+      if (isNotFoundError(statError)) return { status: 'not-found' } as const
+      throw statError
+    }
+
+    if (!targetStats.isFile() || isExpired(namespace, targetStats)) {
+      return { status: 'not-found' } as const
+    }
+
+    const targetExtension = deriveExtension(filename)
+    const uploadedExtension = deriveExtension(file.name)
+
+    if (targetExtension !== uploadedExtension) {
+      return {
+        status: 'extension-mismatch',
+        targetExtension,
+        uploadedExtension,
+      } as const
+    }
+
+    const contents = await file.arrayBuffer()
+    const temporaryPath = namespacePath(
+      namespace,
+      `.${filename}.${crypto.randomUUID()}.tmp`,
+    )
+    const handle = await open(temporaryPath, 'wx')
+    const [, replaceError] = await tryTo(
+      (async () => {
+        try {
+          await handle.writeFile(new Uint8Array(contents))
+        } finally {
+          await handle.close()
+        }
+
+        await rename(temporaryPath, targetPath)
+      })(),
+    )
+    const [, cleanupError] = await tryTo(unlink(temporaryPath))
+
+    if (cleanupError !== null && !isNotFoundError(cleanupError)) {
+      throw cleanupError
+    }
+    if (replaceError !== null) throw replaceError
+
+    return { status: 'replaced' } as const
+  }
+
+  return { store, replace }
 }

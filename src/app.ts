@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { Patterns, cron } from '@elysiajs/cron'
 import { Elysia, t } from 'elysia'
 import { env } from '~/env'
-import { namespaces } from '~/namespaces'
+import { isExpired, namespaces } from '~/namespaces'
 import { createStorage, isValidStoredFilename } from '~/storage'
 import { tryTo } from '~/utils'
 
@@ -43,10 +43,8 @@ export const createApp = ({
     mkdirSync(join(storageRoot, namespace.directory), { recursive: true })
   }
 
-  const storeFile = createStorage({ storageRoot, seed })
+  const storage = createStorage({ storageRoot, seed })
   const sweep = async () => {
-    const now = Date.now()
-
     for (const namespace of Object.values(namespaces)) {
       if (namespace.ttl === null) {
         continue
@@ -69,7 +67,7 @@ export const createApp = ({
           continue
         }
 
-        if (now - entryStats.mtimeMs <= namespace.ttl) continue
+        if (!isExpired(namespace, entryStats)) continue
 
         const [, unlinkError] = await tryTo(unlink(path))
 
@@ -87,11 +85,50 @@ export const createApp = ({
   const createUploadHandler =
     (namespaceName: keyof typeof namespaces) =>
     async ({ body }: { body: { file: File } }) => {
-      const filename = await storeFile(namespaces[namespaceName], body.file)
+      const filename = await storage.store(namespaces[namespaceName], body.file)
       const url = new URL(`/${namespaceName}/${filename}`, baseUrl)
 
       return new Response(`${url.href}\n`, {
         status: 201,
+        headers: { 'content-type': 'text/plain' },
+      })
+    }
+  const createReplaceHandler =
+    (namespaceName: keyof typeof namespaces) =>
+    async ({
+      body,
+      params,
+    }: {
+      body: { file: File }
+      params: { filename: string }
+    }) => {
+      if (!isValidStoredFilename(params.filename)) return notFound()
+
+      const result = await storage.replace(
+        namespaces[namespaceName],
+        params.filename,
+        body.file,
+      )
+
+      if (result.status === 'not-found') return notFound()
+
+      if (result.status === 'extension-mismatch') {
+        const targetExtension = result.targetExtension || '(none)'
+        const uploadedExtension = result.uploadedExtension || '(none)'
+
+        return new Response(
+          `Extension mismatch: target ${targetExtension}, uploaded ${uploadedExtension}\n`,
+          {
+            status: 409,
+            headers: { 'content-type': 'text/plain' },
+          },
+        )
+      }
+
+      const url = new URL(`/${namespaceName}/${params.filename}`, baseUrl)
+
+      return new Response(`${url.href}\n`, {
+        status: 200,
         headers: { 'content-type': 'text/plain' },
       })
     }
@@ -106,12 +143,7 @@ export const createApp = ({
       const [fileStats, statError] = await tryTo(stat(path))
 
       if (statError !== null || !fileStats.isFile()) return notFound()
-      if (
-        namespace.ttl !== null &&
-        Date.now() - fileStats.mtimeMs > namespace.ttl
-      ) {
-        return notFound()
-      }
+      if (isExpired(namespace, fileStats)) return notFound()
 
       // ADR-0002: preserve the stored file's extension-derived MIME type and
       // serve it inline rather than forcing a download.
@@ -161,6 +193,7 @@ export const createApp = ({
       body: uploadBody,
     })
     .post('/w/pt', createUploadHandler('pt'), { body: uploadBody })
+    .put('/w/p/:filename', createReplaceHandler('p'), { body: uploadBody })
     .get('/p/:filename', createReadHandler('p'))
     .get('/pt/:filename', createReadHandler('pt'))
 }
