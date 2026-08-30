@@ -1,7 +1,16 @@
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
+import { unlinkSync } from 'node:fs'
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  utimes,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 
 process.env.BASE_URL = 'https://files.example'
 
@@ -312,6 +321,127 @@ describe('POST /w/p', () => {
   })
 })
 
+describe('POST /w/pt', () => {
+  test('stores the file in pt and returns its temporary URL', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({
+      storageRoot,
+      baseUrl: 'https://slop.example/base/path',
+      seed: 42,
+    })
+    const form = new FormData()
+    form.set('file', new File(['temporary'], 'screenshot.png'))
+
+    const response = await app.handle(
+      new Request('https://spoofed.example/w/pt', {
+        method: 'POST',
+        body: form,
+      }),
+    )
+
+    expect(response.status).toBe(201)
+    expect(response.headers.get('content-type')).toBe('text/plain')
+    const body = await response.text()
+    expect(body).toMatch(/^https:\/\/slop\.example\/pt\/[a-zA-Z0-9]{7}\.png\n$/)
+
+    const filename = new URL(body.trim()).pathname.split('/').pop()
+    expect(filename).toBeDefined()
+    expect(await readFile(join(storageRoot, 'pt', filename!), 'utf8')).toBe(
+      'temporary',
+    )
+    expect(await readdir(join(storageRoot, 'p'))).toEqual([])
+  })
+})
+
+describe('sweeper', () => {
+  test('deletes expired temporary files and keeps newer and permanent files', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const expiredPath = join(storageRoot, 'pt', 'expired.txt')
+    const freshPath = join(storageRoot, 'pt', 'fresh.txt')
+    const permanentPath = join(storageRoot, 'p', 'permanent.txt')
+    const ttl = (await import('~/namespaces')).namespaces.pt.ttl
+    const now = Date.now()
+    await Promise.all([
+      Bun.write(expiredPath, 'expired'),
+      Bun.write(freshPath, 'fresh'),
+      Bun.write(permanentPath, 'permanent'),
+    ])
+    await Promise.all([
+      utimes(
+        expiredPath,
+        new Date(now - ttl - 10_000),
+        new Date(now - ttl - 10_000),
+      ),
+      utimes(
+        freshPath,
+        new Date(now - ttl + 10_000),
+        new Date(now - ttl + 10_000),
+      ),
+      utimes(permanentPath, 0, 0),
+    ])
+
+    await app.store.cron.sweeper.trigger()
+
+    expect(await Bun.file(expiredPath).exists()).toBe(false)
+    expect(await readFile(freshPath, 'utf8')).toBe('fresh')
+    expect(await readFile(permanentPath, 'utf8')).toBe('permanent')
+  })
+
+  test.each(['empty', 'absent'])(
+    'completes when a temporary namespace directory is %s',
+    async (state) => {
+      const storageRoot = await createStorageRoot()
+      const app = createApp({ storageRoot })
+
+      if (state === 'absent') {
+        await rm(join(storageRoot, 'pt'), { recursive: true })
+      }
+
+      await expect(app.store.cron.sweeper.trigger()).resolves.toBeUndefined()
+    },
+  )
+
+  test('logs per-entry errors and continues after a file is removed mid-pass', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const blockedPath = join(storageRoot, 'pt', 'a-directory')
+    const removedPath = join(storageRoot, 'pt', 'm-removed.txt')
+    const expiredPath = join(storageRoot, 'pt', 'z-expired.txt')
+    const ttl = (await import('~/namespaces')).namespaces.pt.ttl
+    const expiredAt = Date.now() - ttl - 10_000
+    await mkdir(blockedPath)
+    await Promise.all([
+      Bun.write(removedPath, 'removed'),
+      Bun.write(expiredPath, 'expired'),
+    ])
+    await Promise.all([
+      utimes(blockedPath, new Date(expiredAt), new Date(expiredAt)),
+      utimes(removedPath, new Date(expiredAt), new Date(expiredAt)),
+      utimes(expiredPath, new Date(expiredAt), new Date(expiredAt)),
+    ])
+    let removed = false
+    const error = spyOn(console, 'error').mockImplementation(() => {
+      if (!removed) {
+        unlinkSync(removedPath)
+        removed = true
+      }
+    })
+
+    try {
+      await app.store.cron.sweeper.trigger()
+
+      expect(error).toHaveBeenCalledTimes(2)
+      expect(error.mock.calls[1]?.[0]).toContain(removedPath)
+      expect(await stat(blockedPath)).toBeDefined()
+      expect(await Bun.file(removedPath).exists()).toBe(false)
+      expect(await Bun.file(expiredPath).exists()).toBe(false)
+    } finally {
+      error.mockRestore()
+    }
+  })
+})
+
 describe('configuration', () => {
   test('fails at import time when BASE_URL is missing', async () => {
     const process = Bun.spawn(['bun', '-e', "import './src/env.ts'"], {
@@ -345,6 +475,7 @@ describe('configuration', () => {
       STORAGE_ROOT: './storage',
       BASE_URL: 'https://files.example',
       MAX_UPLOAD_BYTES: 100 * 1024 * 1024,
+      TEMP_TTL: 24 * 60 * 60 * 1000,
     })
   })
 })
@@ -354,6 +485,13 @@ describe('namespaces', () => {
     expect((await import('~/namespaces')).namespaces.p).toEqual({
       directory: 'p',
       ttl: null,
+    })
+  })
+
+  test('declares pt as a temporary namespace', async () => {
+    expect((await import('~/namespaces')).namespaces.pt).toEqual({
+      directory: 'pt',
+      ttl: 24 * 60 * 60 * 1000,
     })
   })
 })

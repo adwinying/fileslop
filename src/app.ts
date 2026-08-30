@@ -1,5 +1,7 @@
 import { mkdirSync } from 'node:fs'
+import { readdir, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
+import { Patterns, cron } from '@elysiajs/cron'
 import { Elysia, t } from 'elysia'
 import { env } from '~/env'
 import { namespaces } from '~/namespaces'
@@ -31,8 +33,72 @@ export const createApp = ({
   }
 
   const storeFile = createStorage({ storageRoot, seed })
+  const sweep = async () => {
+    const now = Date.now()
+
+    for (const namespace of Object.values(namespaces)) {
+      if (namespace.ttl === null) {
+        continue
+      }
+
+      const directory = join(storageRoot, namespace.directory)
+      let entries: string[]
+
+      try {
+        entries = await readdir(directory)
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          'code' in error &&
+          error.code === 'ENOENT'
+        ) {
+          continue
+        }
+
+        throw error
+      }
+
+      for (const entry of entries.sort()) {
+        const path = join(directory, entry)
+
+        try {
+          const { mtimeMs } = await stat(path)
+
+          if (now - mtimeMs > namespace.ttl) {
+            await unlink(path)
+          }
+        } catch (error) {
+          console.error(`Failed to sweep ${path}`, error)
+        }
+      }
+    }
+  }
+  const uploadBody = t.Object(
+    {
+      file: t.File({ maxSize: maxUploadBytes }),
+    },
+    { additionalProperties: false },
+  )
+  const createUploadHandler =
+    (namespaceName: keyof typeof namespaces) =>
+    async ({ body }: { body: { file: File } }) => {
+      const filename = await storeFile(namespaces[namespaceName], body.file)
+      const url = new URL(`/${namespaceName}/${filename}`, baseUrl)
+
+      return new Response(`${url.href}\n`, {
+        status: 201,
+        headers: { 'content-type': 'text/plain' },
+      })
+    }
 
   return new Elysia({ normalize: false })
+    .use(
+      cron({
+        name: 'sweeper',
+        pattern: Patterns.hourly(),
+        run: sweep,
+      }),
+    )
     .onError(({ code, error }) => {
       if (
         code === 'VALIDATION' &&
@@ -42,24 +108,8 @@ export const createApp = ({
         return new Response('Payload Too Large\n', { status: 413 })
       }
     })
-    .post(
-      '/w/p',
-      async ({ body }) => {
-        const filename = await storeFile(namespaces.p, body.file)
-        const url = new URL(`/p/${filename}`, baseUrl)
-
-        return new Response(`${url.href}\n`, {
-          status: 201,
-          headers: { 'content-type': 'text/plain' },
-        })
-      },
-      {
-        body: t.Object(
-          {
-            file: t.File({ maxSize: maxUploadBytes }),
-          },
-          { additionalProperties: false },
-        ),
-      },
-    )
+    .post('/w/p', createUploadHandler('p'), {
+      body: uploadBody,
+    })
+    .post('/w/pt', createUploadHandler('pt'), { body: uploadBody })
 }
