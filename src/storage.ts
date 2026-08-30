@@ -1,9 +1,11 @@
 import type { Namespace } from '~/namespaces'
+import { open } from 'node:fs/promises'
 import { join } from 'node:path'
 
 const ALPHABET =
   'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
 const SLUG_LENGTH = 7
+const MAX_WRITE_ATTEMPTS = 5
 const MAX_UNBIASED_BYTE = 248
 const COMPOUND_EXTENSIONS = ['.tar.gz', '.tar.bz2', '.tar.xz', '.tar.zst']
 
@@ -70,12 +72,40 @@ const deriveExtension = (name: string) => {
   return /^[a-z0-9]{1,10}$/.test(suffix) ? `.${suffix}` : ''
 }
 
+const isAlreadyExistsError = (error: unknown) =>
+  error instanceof Error && 'code' in error && error.code === 'EEXIST'
+
+const writeExclusively = async (path: string, contents: ArrayBuffer) => {
+  const handle = await open(path, 'wx')
+
+  try {
+    await handle.writeFile(new Uint8Array(contents))
+  } finally {
+    await handle.close()
+  }
+}
+
 export const createStorage = ({ storageRoot, seed }: StorageOptions) => {
   const generateSlug = createSlugGenerator(seed)
 
   return async (namespace: Namespace, file: File) => {
-    const filename = `${generateSlug()}${deriveExtension(file.name)}`
-    await Bun.write(join(storageRoot, namespace.directory, filename), file)
-    return filename
+    const extension = deriveExtension(file.name)
+    const contents = await file.arrayBuffer()
+
+    for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt += 1) {
+      const filename = `${generateSlug()}${extension}`
+
+      try {
+        await writeExclusively(
+          join(storageRoot, namespace.directory, filename),
+          contents,
+        )
+        return filename
+      } catch (error) {
+        if (!isAlreadyExistsError(error)) throw error
+      }
+    }
+
+    throw new Error(`Could not store file after ${MAX_WRITE_ATTEMPTS} attempts`)
   }
 }

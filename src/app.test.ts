@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'bun:test'
@@ -71,6 +71,91 @@ describe('POST /w/p', () => {
     expect(
       new Uint8Array(await readFile(join(storageRoot, 'p', filename!))),
     ).toEqual(contents)
+  })
+
+  test('retries a slug collision without changing the existing file', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot, seed: 42 })
+    const existingPath = join(storageRoot, 'p', 'aogXozu.txt')
+    await Bun.write(existingPath, 'existing')
+
+    const response = await upload(
+      app,
+      new File(['uploaded'], 'report.txt'),
+      'report.txt',
+      'host.example',
+    )
+
+    expect(response.status).toBe(201)
+    expect(await response.text()).toBe('https://files.example/p/bEd7x14.txt\n')
+    expect(await readFile(existingPath, 'utf8')).toBe('existing')
+    expect(await readFile(join(storageRoot, 'p', 'bEd7x14.txt'), 'utf8')).toBe(
+      'uploaded',
+    )
+  })
+
+  test('responds 500 after five slug collisions', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot, seed: 42 })
+    const occupiedSlugs = [
+      'aogXozu',
+      'bEd7x14',
+      'bmI5jgI',
+      'YmydkzV',
+      'fRW34B6',
+    ]
+    await Promise.all(
+      occupiedSlugs.map((slug) =>
+        Bun.write(join(storageRoot, 'p', `${slug}.txt`), 'existing'),
+      ),
+    )
+
+    const response = await upload(
+      app,
+      new File(['uploaded'], 'report.txt'),
+      'report.txt',
+      'host.example',
+    )
+
+    expect(response.status).toBe(500)
+    expect(await readdir(join(storageRoot, 'p'))).toHaveLength(5)
+  })
+
+  test('stores concurrent uploads under distinct filenames', async () => {
+    const storageRoot = await createStorageRoot()
+    const firstApp = createApp({ storageRoot, seed: 42 })
+    const secondApp = createApp({ storageRoot, seed: 42 })
+
+    const [firstResponse, secondResponse] = await Promise.all([
+      upload(
+        firstApp,
+        new File(['first'], 'report.txt'),
+        'report.txt',
+        'host.example',
+      ),
+      upload(
+        secondApp,
+        new File(['second'], 'report.txt'),
+        'report.txt',
+        'host.example',
+      ),
+    ])
+
+    expect(firstResponse.status).toBe(201)
+    expect(secondResponse.status).toBe(201)
+    const urls = await Promise.all([
+      firstResponse.text(),
+      secondResponse.text(),
+    ])
+    expect(new Set(urls).size).toBe(2)
+    const contents = await Promise.all(
+      urls.map(async (url) => {
+        const filename = new URL(url.trim()).pathname.split('/').pop()
+        expect(filename).toBeDefined()
+        return readFile(join(storageRoot, 'p', filename!), 'utf8')
+      }),
+    )
+    expect(contents.sort()).toEqual(['first', 'second'])
   })
 
   test('preserves an allowed compound extension', async () => {
