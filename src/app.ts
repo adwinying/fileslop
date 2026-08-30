@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { Patterns, cron } from '@elysiajs/cron'
 import { Elysia, t } from 'elysia'
 import { env } from '~/env'
-import { namespaces } from '~/namespaces'
+import { isExpired, namespaces } from '~/namespaces'
 import { createStorage, isValidStoredFilename } from '~/storage'
 import { tryTo } from '~/utils'
 
@@ -45,8 +45,6 @@ export const createApp = ({
 
   const storeFile = createStorage({ storageRoot, seed })
   const sweep = async () => {
-    const now = Date.now()
-
     for (const namespace of Object.values(namespaces)) {
       if (namespace.ttl === null) {
         continue
@@ -69,7 +67,7 @@ export const createApp = ({
           continue
         }
 
-        if (now - entryStats.mtimeMs <= namespace.ttl) continue
+        if (!isExpired(namespace, entryStats)) continue
 
         const [, unlinkError] = await tryTo(unlink(path))
 
@@ -106,12 +104,7 @@ export const createApp = ({
       const [fileStats, statError] = await tryTo(stat(path))
 
       if (statError !== null || !fileStats.isFile()) return notFound()
-      if (
-        namespace.ttl !== null &&
-        Date.now() - fileStats.mtimeMs > namespace.ttl
-      ) {
-        return notFound()
-      }
+      if (isExpired(namespace, fileStats)) return notFound()
 
       // ADR-0002: preserve the stored file's extension-derived MIME type and
       // serve it inline rather than forcing a download.
