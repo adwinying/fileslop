@@ -46,12 +46,13 @@ const replace = (
   filename: string,
   file: Blob,
   originalName: string,
+  namespace: 'p' | 'pt' = 'p',
 ) => {
   const form = new FormData()
   form.set('file', file, originalName)
 
   return app.handle(
-    new Request(`https://spoofed.example/w/p/${filename}`, {
+    new Request(`https://spoofed.example/w/${namespace}/${filename}`, {
       method: 'PUT',
       body: form,
     }),
@@ -525,6 +526,120 @@ describe('PUT /w/p/:filename', () => {
       expect(await readFile(path, 'utf8')).toBe('old')
       expect(await readdir(join(storageRoot, 'p'))).toEqual([filename])
     }
+  })
+})
+
+describe('PUT /w/pt/:filename', () => {
+  test('replaces an existing temporary file and returns its URL', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({
+      storageRoot,
+      baseUrl: 'https://slop.example/base/path',
+    })
+    const filename = 'aB3dE5g.txt'
+    const path = join(storageRoot, 'pt', filename)
+    await Bun.write(path, 'old')
+
+    const response = await replace(
+      app,
+      filename,
+      new Blob(['replacement']),
+      'replacement.txt',
+      'pt',
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('https://slop.example/pt/aB3dE5g.txt\n')
+    expect(await readFile(path, 'utf8')).toBe('replacement')
+  })
+
+  test('returns the same miss as GET and an absent target for an expired file', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const filename = 'aB3dE5g.txt'
+    const path = join(storageRoot, 'pt', filename)
+    const ttl = (await import('~/namespaces')).namespaces.pt.ttl
+    await Bun.write(path, 'expired')
+    await utimes(path, 0, new Date(Date.now() - ttl - 10_000))
+
+    const expiredResponse = await replace(
+      app,
+      filename,
+      new Blob(['replacement']),
+      'replacement.txt',
+      'pt',
+    )
+    const absentResponse = await replace(
+      app,
+      'zY7xW5v.txt',
+      new Blob(['replacement']),
+      'replacement.txt',
+      'pt',
+    )
+    const readResponse = await app.handle(
+      new Request(`https://files.example/pt/${filename}`),
+    )
+
+    expect(expiredResponse.status).toBe(404)
+    expect(readResponse.status).toBe(404)
+    expect(await expiredResponse.text()).toBe(await absentResponse.text())
+    expect(await readResponse.text()).toBe('Not Found\n')
+    expect(await readFile(path, 'utf8')).toBe('expired')
+    expect((await stat(path)).isFile()).toBe(true)
+  })
+
+  test('replaces a temporary file just inside its TTL', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const filename = 'aB3dE5g.txt'
+    const path = join(storageRoot, 'pt', filename)
+    const ttl = (await import('~/namespaces')).namespaces.pt.ttl
+    await Bun.write(path, 'old')
+    await utimes(path, 0, new Date(Date.now() - ttl + 10_000))
+
+    const response = await replace(
+      app,
+      filename,
+      new Blob(['replacement']),
+      'replacement.txt',
+      'pt',
+    )
+    const readResponse = await app.handle(
+      new Request(`https://files.example/pt/${filename}`),
+    )
+
+    expect(response.status).toBe(200)
+    expect(readResponse.status).toBe(200)
+    expect(await readResponse.text()).toBe('replacement')
+  })
+
+  test('refreshes mtime so the next sweep keeps the replacement', async () => {
+    const storageRoot = await createStorageRoot()
+    const app = createApp({ storageRoot })
+    const filename = 'aB3dE5g.txt'
+    const path = join(storageRoot, 'pt', filename)
+    const ttl = (await import('~/namespaces')).namespaces.pt.ttl
+    const originalMtime = Date.now() - ttl + 1_000
+    await Bun.write(path, 'old')
+    await utimes(path, 0, new Date(originalMtime))
+
+    const response = await replace(
+      app,
+      filename,
+      new Blob(['replacement']),
+      'replacement.txt',
+      'pt',
+    )
+    const replacedMtime = (await stat(path)).mtimeMs
+
+    expect(response.status).toBe(200)
+    expect(replacedMtime).toBeGreaterThan(Date.now() - 10_000)
+
+    await Bun.sleep(1_100)
+    expect(Date.now() - originalMtime).toBeGreaterThan(ttl)
+    await app.store.cron.sweeper.trigger()
+
+    expect(await readFile(path, 'utf8')).toBe('replacement')
   })
 })
 
