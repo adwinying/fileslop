@@ -326,6 +326,20 @@ describe('configuration', () => {
     expect(await new Response(process.stderr).text()).toContain('BASE_URL')
   })
 
+  test('rejects a non-HTTP BASE_URL at import time', async () => {
+    const process = Bun.spawn(['bun', '-e', "import './src/env.ts'"], {
+      cwd: import.meta.dir.replace(/\/src$/, ''),
+      env: {
+        BASE_URL: 'mailto:ops@example.com',
+        PATH: Bun.env.PATH ?? '',
+      },
+      stderr: 'pipe',
+    })
+
+    expect(await process.exited).not.toBe(0)
+    expect(await new Response(process.stderr).text()).toContain('BASE_URL')
+  })
+
   test('applies configuration defaults', async () => {
     expect((await import('~/env')).env).toMatchObject({
       STORAGE_ROOT: './storage',
