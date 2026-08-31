@@ -56,6 +56,7 @@ export const start = async ({
         emails: config.ACCESS_EMAILS,
         fetch: fetcher,
         identityProviders: config.ACCESS_IDPS,
+        port,
         sessionDuration: config.ACCESS_SESSION_DURATION,
       }),
     )
@@ -70,6 +71,8 @@ export const start = async ({
       accountId: config.CLOUDFLARE_ACCOUNT_ID,
       apiToken: config.CLOUDFLARE_API_TOKEN,
       baseUrl: config.BASE_URL,
+      emailDomains: config.ACCESS_EMAIL_DOMAINS,
+      emails: config.ACCESS_EMAILS,
       fetch: fetcher,
     })
   }
@@ -86,8 +89,11 @@ export const start = async ({
   console.log(`fileslop is listening on ${app.server?.url}`)
 
   if (tunnelToken) {
+    const cloudflaredEnv = { ...process.env }
+    delete cloudflaredEnv.CLOUDFLARE_API_TOKEN
+
     spawn(['cloudflared', 'tunnel', '--no-autoupdate', 'run'], {
-      env: { ...process.env, TUNNEL_TOKEN: tunnelToken },
+      env: { ...cloudflaredEnv, TUNNEL_TOKEN: tunnelToken },
       stderr: 'inherit',
       stdout: 'inherit',
       onExit: (exitCode) => process.exit(exitCode ?? 1),

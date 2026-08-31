@@ -3,9 +3,9 @@ import { z } from 'zod'
 import { tryTo } from '~/utils'
 
 const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4'
+const CLOUDFLARE_REQUEST_TIMEOUT_MS = 10_000
 const namespaces = ['r', 'rt'] as const
 const readNamespaces = ['p', 'pt', 'r', 'rt'] as const
-const originService = 'http://localhost:3000'
 
 const apiErrorSchema = z.object({ message: z.string() })
 const resultInfoSchema = z
@@ -42,7 +42,7 @@ const tunnelSchema = z.object({
   name: z.string(),
   config_src: z.string().optional(),
 })
-const ingressRuleSchema = z.object({
+const ingressRuleSchema = z.looseObject({
   hostname: z.string().optional(),
   path: z.string().optional(),
   service: z.string(),
@@ -50,7 +50,7 @@ const ingressRuleSchema = z.object({
 })
 const tunnelConfigurationSchema = z.object({
   config: z
-    .object({
+    .looseObject({
       ingress: z.array(ingressRuleSchema).optional(),
       originRequest: z.record(z.string(), z.unknown()).optional(),
     })
@@ -110,6 +110,7 @@ type ProvisioningOptions = {
   emails?: string
   fetch: Fetch
   identityProviders?: IdentityProvider[]
+  port: number
   sessionDuration: string
 }
 
@@ -169,6 +170,7 @@ const cloudflareRequest = async <Schema extends z.ZodType>({
         authorization: `Bearer ${apiToken}`,
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
+      signal: AbortSignal.timeout(CLOUDFLARE_REQUEST_TIMEOUT_MS),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }),
   )
@@ -234,18 +236,19 @@ const canonicalJson = (value: unknown): string => {
   return JSON.stringify(value) ?? 'undefined'
 }
 
-const desiredReadIngress = (hostname: string) =>
+const desiredReadIngress = (hostname: string, port: number) =>
   readNamespaces.map((namespace) => ({
     hostname,
     path: `^/${namespace}(/.*)?$`,
-    service: originService,
+    service: `http://localhost:${port}`,
   }))
 
 const reconcileIngress = (
   current: z.infer<typeof ingressRuleSchema>[],
   hostname: string,
+  port: number,
 ) => {
-  const readRules = desiredReadIngress(hostname)
+  const readRules = desiredReadIngress(hostname, port)
   const next = [...current]
   const terminalIndex = next.findIndex(
     (rule) => rule.hostname === undefined && rule.path === undefined,
@@ -276,11 +279,13 @@ const reconcileTunnel = async ({
   apiToken,
   fetch: fetcher,
   hostname,
+  port,
 }: {
   accountId: string
   apiToken: string
   fetch: Fetch
   hostname: string
+  port: number
 }) => {
   const tunnelsPath = `/accounts/${accountId}/cfd_tunnel`
   const tunnels = await cloudflareRequest({
@@ -338,7 +343,7 @@ const reconcileTunnel = async ({
   })
   const currentConfig = configuration.result.config ?? {}
   const currentIngress = currentConfig.ingress ?? []
-  const ingress = reconcileIngress(currentIngress, hostname)
+  const ingress = reconcileIngress(currentIngress, hostname, port)
 
   if (canonicalJson(ingress) !== canonicalJson(currentIngress)) {
     await cloudflareRequest({
@@ -726,6 +731,7 @@ export const runCloudflareProvisioning = async ({
   emails,
   fetch: fetcher,
   identityProviders = [],
+  port,
   sessionDuration,
 }: ProvisioningOptions) => {
   const resolvedAccountId =
@@ -819,6 +825,7 @@ export const runCloudflareProvisioning = async ({
     apiToken,
     fetch: fetcher,
     hostname,
+    port,
   })
   await reconcileDnsRecord({
     accountId: resolvedAccountId,

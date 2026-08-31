@@ -93,6 +93,12 @@ export const verifyExternal = async ({
       )
     }
 
+    if (response.status !== 404) {
+      throw new VerificationError(
+        `GET /${namespace}/ returned unexpected status (${response.status})`,
+      )
+    }
+
     logger.log(
       `PASS GET /${namespace}/ does not challenge for Cloudflare Access`,
     )

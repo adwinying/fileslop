@@ -185,6 +185,8 @@ describe('startup', () => {
         { status: 503 },
       ),
       jsonResponse([application('r'), application('rt')]),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
       jsonResponse([tunnel]),
       jsonResponse({
         config: {
@@ -212,7 +214,7 @@ describe('startup', () => {
       'tunnel ingress check: /w/ is routed',
     )
 
-    expect(fetch).toHaveBeenCalledTimes(4)
+    expect(fetch).toHaveBeenCalledTimes(6)
   })
 
   test('starts and supervises cloudflared without exposing its token', async () => {
@@ -251,6 +253,7 @@ describe('startup', () => {
     expect(command).toEqual(['cloudflared', 'tunnel', '--no-autoupdate', 'run'])
     expect(command).not.toContain('tunnel-token')
     expect(options.env.TUNNEL_TOKEN).toBe('tunnel-token')
+    expect(options.env.CLOUDFLARE_API_TOKEN).toBeUndefined()
     expect(JSON.stringify([log.mock.calls, error.mock.calls])).not.toContain(
       'tunnel-token',
     )
@@ -265,6 +268,33 @@ describe('startup', () => {
     expect(spawn).toHaveBeenCalledTimes(1)
   })
 
+  test('uses the listening port for tunnel ingress', async () => {
+    spyOn(console, 'log').mockImplementation(() => undefined)
+    const fetch = existingCloudflareFetch()
+
+    await configureStartup({
+      CLOUDFLARE_API_TOKEN: 'token',
+      CLOUDFLARE_ACCOUNT_ID: 'account-id',
+      ACCESS_EMAILS: 'operator@example.com',
+    })
+
+    await startServer({ fetch, port: 4000 })
+
+    const update = fetch.mock.calls.find(
+      ([input, init]) =>
+        input.toString().endsWith('/configurations') && init?.method === 'PUT',
+    )
+    const body = JSON.parse(String(update?.[1]?.body)) as {
+      config: { ingress: Array<{ service: string }> }
+    }
+
+    expect(
+      body.config.ingress
+        .slice(0, 4)
+        .every(({ service }) => service === 'http://localhost:4000'),
+    ).toBe(true)
+  })
+
   test('runs preflight after provisioning fails', async () => {
     spyOn(console, 'log').mockImplementation(() => undefined)
     const error = spyOn(console, 'error').mockImplementation(() => undefined)
@@ -277,8 +307,10 @@ describe('startup', () => {
         success: true,
         errors: [],
         messages: [],
-        result: [{ type: 'self_hosted', domain: 'files.example' }],
+        result: [application('r'), application('rt')],
       }),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
     ]
     const fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
       const infrastructure = infrastructureResponse(input, init)
@@ -295,7 +327,7 @@ describe('startup', () => {
 
     await startServer({ fetch })
 
-    expect(fetch).toHaveBeenCalledTimes(4)
+    expect(fetch).toHaveBeenCalledTimes(6)
     expect(error).toHaveBeenCalledWith(
       'Cloudflare provisioning failed: Access application lookup: temporary outage',
     )
@@ -315,6 +347,8 @@ describe('startup', () => {
       identityProvider('One-time PIN', 'onetimepin', {}),
       identityProvider('Company SSO', 'oidc', { client_id: 'client-id' }),
       [application('r'), application('rt')],
+      [policy('r')],
+      [policy('rt')],
     ].map((result) =>
       Response.json({ success: true, errors: [], messages: [], result }),
     )
@@ -340,7 +374,7 @@ describe('startup', () => {
 
     await startServer({ fetch })
 
-    expect(fetch).toHaveBeenCalledTimes(18)
+    expect(fetch).toHaveBeenCalledTimes(20)
   })
 
   test('rejects a token with no Access allowlist during validation', async () => {
@@ -375,5 +409,22 @@ describe('startup', () => {
         ACCESS_IDPS: 'not-json',
       }),
     ).toThrow('Invalid environment variables')
+  })
+
+  test('rejects duplicate and reserved ACCESS_IDPS names', () => {
+    spyOn(console, 'error').mockImplementation(() => undefined)
+    const provider = { name: 'Company SSO', type: 'oidc', config: {} }
+
+    for (const identityProviders of [
+      [provider, provider],
+      [{ ...provider, name: 'One-time PIN' }],
+    ]) {
+      expect(() =>
+        createEnvironment({
+          BASE_URL: 'https://files.example',
+          ACCESS_IDPS: JSON.stringify(identityProviders),
+        }),
+      ).toThrow('Invalid environment variables')
+    }
   })
 })

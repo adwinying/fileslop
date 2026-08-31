@@ -55,6 +55,23 @@ describe('external verification', () => {
     ).rejects.toThrow('GET /r/ did not challenge for Cloudflare Access (404)')
   })
 
+  test('fails when a public namespace returns an unexpected status', async () => {
+    const fetcher = async (input: RequestInfo | URL) => {
+      const namespace = new URL(input.toString()).pathname.split('/')[1]
+
+      return ['r', 'rt'].includes(namespace ?? '')
+        ? accessChallenge()
+        : new Response('Unavailable\n', { status: 503 })
+    }
+
+    await expect(
+      verifyExternal({
+        deployedUrl: 'https://files.example',
+        fetcher,
+      }),
+    ).rejects.toThrow('GET /p/ returned unexpected status (503)')
+  })
+
   test('fails when the write prefix reaches an HTTP service', async () => {
     const routedFetcher = async (input: RequestInfo | URL) => {
       const url = new URL(input.toString())

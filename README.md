@@ -47,8 +47,8 @@ does not modify unrelated resources and never deletes resources. Without
 After provisioning, preflight checks that `r` and `rt` are covered by Access,
 all read namespaces are routed, and `/w/` is not routed through the tunnel. A
 failed preflight stops startup. It cannot tell whether clients can reach the
-origin directly, bypassing the tunnel. The deployment checks added in
-[#37](https://github.com/adwinying/fileslop/issues/37) cover that gap.
+origin directly, bypassing the tunnel. Run the
+[deployment verification](#verify-a-deployment) to cover that gap.
 
 ### Environment
 

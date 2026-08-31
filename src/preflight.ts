@@ -2,6 +2,8 @@ import { z } from 'zod'
 import { tryTo } from '~/utils'
 
 const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4'
+const CLOUDFLARE_REQUEST_TIMEOUT_MS = 10_000
+const namespaces = ['r', 'rt'] as const
 
 const apiErrorSchema = z.object({ message: z.string() })
 const accountResponseSchema = z.object({
@@ -21,6 +23,8 @@ const applicationResponseSchema = z.object({
   errors: z.array(apiErrorSchema),
   result: z.array(
     z.object({
+      id: z.string(),
+      name: z.string(),
       type: z.string(),
       domain: z.string().optional(),
       destinations: z.array(destinationSchema).optional(),
@@ -58,6 +62,21 @@ const tunnelConfigurationResponseSchema = z.object({
       .optional(),
   }),
 })
+const policyResponseSchema = z.object({
+  success: z.literal(true),
+  errors: z.array(apiErrorSchema),
+  result: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      decision: z.string(),
+      include: z.array(z.record(z.string(), z.unknown())),
+    }),
+  ),
+  result_info: z
+    .object({ total_count: z.number().int().nonnegative().optional() })
+    .optional(),
+})
 
 export type Fetch = (
   input: RequestInfo | URL,
@@ -68,8 +87,64 @@ type PreflightOptions = {
   accountId?: string
   apiToken: string
   baseUrl: string
+  emailDomains?: string
+  emails?: string
   fetch: Fetch
 }
+
+type Namespace = (typeof namespaces)[number]
+
+type AccessRule =
+  { email: { email: string } } | { email_domain: { domain: string } }
+
+const splitValues = (value?: string) =>
+  value
+    ?.split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0) ?? []
+
+const ownedApplicationName = (hostname: string, namespace: Namespace) =>
+  `fileslop:${hostname}:${namespace}`
+
+const ownedPolicyName = (hostname: string, namespace: Namespace) =>
+  `${ownedApplicationName(hostname, namespace)}:allow`
+
+const expectedRules = (
+  emails?: string,
+  emailDomains?: string,
+): AccessRule[] => [
+  ...splitValues(emails).map((email) => ({ email: { email } })),
+  ...splitValues(emailDomains).map((domain) => ({
+    email_domain: { domain: domain.replace(/^@/, '') },
+  })),
+]
+
+const ruleKey = (rule: Record<string, unknown>) => JSON.stringify(rule)
+
+const policyMatches = (
+  policy: z.infer<typeof policyResponseSchema>['result'][number],
+  name: string,
+  include: AccessRule[],
+) => {
+  const currentRules = policy.include.map(ruleKey).sort()
+  const expected = include.map(ruleKey).sort()
+
+  return (
+    policy.name === name &&
+    policy.decision === 'allow' &&
+    currentRules.length === expected.length &&
+    currentRules.every((rule, index) => rule === expected[index])
+  )
+}
+
+const hasEveryoneBypass = (
+  policies: z.infer<typeof policyResponseSchema>['result'],
+) =>
+  policies.some(
+    (policy) =>
+      policy.decision === 'bypass' &&
+      policy.include.some((rule) => 'everyone' in rule),
+  )
 
 const escapeRegex = (value: string) =>
   value.replace(/[|\\{}()[\]^$+?.]/g, '\\$&')
@@ -161,6 +236,7 @@ const getJson = async <Schema extends z.ZodType>(
     fetcher(url, {
       method: 'GET',
       headers: { authorization: `Bearer ${apiToken}` },
+      signal: AbortSignal.timeout(CLOUDFLARE_REQUEST_TIMEOUT_MS),
     }),
   )
 
@@ -234,6 +310,8 @@ export const runCloudflarePreflight = async ({
   accountId,
   apiToken,
   baseUrl,
+  emailDomains,
+  emails,
   fetch: fetcher,
 }: PreflightOptions) => {
   const resolvedAccountId =
@@ -255,15 +333,22 @@ export const runCloudflarePreflight = async ({
     )
   }
 
-  const destinations = response.result
-    .filter((application) => application.type === 'self_hosted')
-    .flatMap(getApplicationDestinations)
   const hostname = new URL(baseUrl).hostname
-  const namespaces = ['r', 'rt'] as const
+  const applications = response.result
+    .filter((application) => application.type === 'self_hosted')
+    .map((application) => ({
+      application,
+      namespaces: namespaces.filter((namespace) =>
+        getApplicationDestinations(application).some((destination) =>
+          destinationCoversNamespace(destination, hostname, namespace),
+        ),
+      ),
+    }))
+    .filter(({ namespaces: coveredNamespaces }) => coveredNamespaces.length > 0)
   const uncovered = namespaces.filter(
     (namespace) =>
-      !destinations.some((destination) =>
-        destinationCoversNamespace(destination, hostname, namespace),
+      !applications.some(({ namespaces: covered }) =>
+        covered.includes(namespace),
       ),
   )
 
@@ -272,6 +357,71 @@ export const runCloudflarePreflight = async ({
       `Cloudflare preflight failed: Access application coverage check: ${uncovered.join(
         ' and ',
       )} ${uncovered.length === 1 ? 'is' : 'are'} unprotected on ${hostname}`,
+    )
+  }
+
+  const include = expectedRules(emails, emailDomains)
+  const validatedPolicies = new Set<Namespace>()
+
+  for (const { application, namespaces: covered } of applications) {
+    const policies = await getJson(
+      `${CLOUDFLARE_API_URL}/accounts/${resolvedAccountId}/access/apps/${application.id}/policies?per_page=1000`,
+      apiToken,
+      fetcher,
+      policyResponseSchema,
+      'Access policy check',
+    )
+
+    if (
+      policies.result_info?.total_count !== undefined &&
+      policies.result_info.total_count > policies.result.length
+    ) {
+      throw new Error(
+        'Cloudflare preflight failed: Access policy check: the policy list is incomplete',
+      )
+    }
+
+    if (hasEveryoneBypass(policies.result)) {
+      throw new Error(
+        `Cloudflare preflight failed: Access policy check: an Everyone bypass covers ${covered.join(
+          ' and ',
+        )}`,
+      )
+    }
+
+    for (const namespace of covered) {
+      if (application.name !== ownedApplicationName(hostname, namespace)) {
+        continue
+      }
+
+      const expectedName = ownedPolicyName(hostname, namespace)
+      const ownedPolicies = policies.result.filter(
+        (policy) => policy.name === expectedName,
+      )
+
+      if (
+        policies.result.length !== 1 ||
+        ownedPolicies.length !== 1 ||
+        !policyMatches(ownedPolicies[0]!, expectedName, include)
+      ) {
+        throw new Error(
+          `Cloudflare preflight failed: Access policy check: ${namespace} policy does not match configuration`,
+        )
+      }
+
+      validatedPolicies.add(namespace)
+    }
+  }
+
+  const missingPolicies = namespaces.filter(
+    (namespace) => !validatedPolicies.has(namespace),
+  )
+
+  if (missingPolicies.length > 0) {
+    throw new Error(
+      `Cloudflare preflight failed: Access policy check: expected one owned application and policy for ${missingPolicies.join(
+        ' and ',
+      )}`,
     )
   }
 

@@ -20,13 +20,37 @@ const accessIdpsSchema = z
     return parsed
   })
   .pipe(
-    z.array(
-      z.object({
-        name: z.string().min(1),
-        type: z.string().min(1),
-        config: z.record(z.string(), z.unknown()),
+    z
+      .array(
+        z.object({
+          name: z.string().min(1),
+          type: z.string().min(1),
+          config: z.record(z.string(), z.unknown()),
+        }),
+      )
+      .superRefine((providers, context) => {
+        const names = new Set<string>()
+
+        providers.forEach(({ name }, index) => {
+          if (name === 'One-time PIN') {
+            context.addIssue({
+              code: 'custom',
+              message: 'One-time PIN is managed by fileslop',
+              path: [index, 'name'],
+            })
+          }
+
+          if (names.has(name)) {
+            context.addIssue({
+              code: 'custom',
+              message: 'identity provider names must be unique',
+              path: [index, 'name'],
+            })
+          }
+
+          names.add(name)
+        })
       }),
-    ),
   )
 
 const server = {

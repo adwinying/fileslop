@@ -16,6 +16,24 @@ const tunnel = {
   config_src: 'cloudflare',
 }
 
+const application = (namespace: 'r' | 'rt', id = `${namespace}-app`) => ({
+  id,
+  name: `fileslop:files.example:${namespace}`,
+  type: 'self_hosted',
+  destinations: [{ type: 'public', uri: `files.example/${namespace}/*` }],
+})
+
+const policy = (
+  namespace: 'r' | 'rt',
+  overrides: Record<string, unknown> = {},
+) => ({
+  id: `${namespace}-policy`,
+  name: `fileslop:files.example:${namespace}:allow`,
+  decision: 'allow',
+  include: [{ email: { email: 'operator@example.com' } }],
+  ...overrides,
+})
+
 const safeIngress = [
   ...(['p', 'pt', 'r', 'rt'] as const).map((namespace) => ({
     hostname: 'files.example',
@@ -43,15 +61,9 @@ describe('Cloudflare preflight', () => {
       jsonResponse([{ id: 'account-id', name: 'Personal' }], {
         total_count: 1,
       }),
-      jsonResponse([
-        {
-          type: 'self_hosted',
-          destinations: [
-            { type: 'public', uri: 'files.example/r/*' },
-            { type: 'public', uri: 'files.example/rt/*' },
-          ],
-        },
-      ]),
+      jsonResponse([application('r'), application('rt')]),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
       jsonResponse([tunnel]),
       jsonResponse({ config: { ingress: safeIngress } }),
     ])
@@ -59,12 +71,15 @@ describe('Cloudflare preflight', () => {
     await runCloudflarePreflight({
       apiToken: 'token',
       baseUrl: 'https://files.example/base',
+      emails: 'operator@example.com',
       fetch,
     })
 
     expect(requests.map(({ input }) => input.toString())).toEqual([
       'https://api.cloudflare.com/client/v4/accounts?per_page=50',
       'https://api.cloudflare.com/client/v4/accounts/account-id/access/apps?per_page=1000',
+      'https://api.cloudflare.com/client/v4/accounts/account-id/access/apps/r-app/policies?per_page=1000',
+      'https://api.cloudflare.com/client/v4/accounts/account-id/access/apps/rt-app/policies?per_page=1000',
       'https://api.cloudflare.com/client/v4/accounts/account-id/cfd_tunnel?is_deleted=false&per_page=1000',
       'https://api.cloudflare.com/client/v4/accounts/account-id/cfd_tunnel/tunnel-id/configurations',
     ])
@@ -76,11 +91,16 @@ describe('Cloudflare preflight', () => {
           'Bearer token',
       ),
     ).toBe(true)
+    expect(
+      requests.every(({ init }) => init?.signal instanceof AbortSignal),
+    ).toBe(true)
   })
 
   test('uses an explicit account without listing accounts', async () => {
     const { fetch, requests } = createFetch([
-      jsonResponse([{ type: 'self_hosted', domain: 'files.example' }]),
+      jsonResponse([application('r'), application('rt')]),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
       jsonResponse([tunnel]),
       jsonResponse({ config: { ingress: safeIngress } }),
     ])
@@ -89,10 +109,11 @@ describe('Cloudflare preflight', () => {
       accountId: 'configured-account',
       apiToken: 'token',
       baseUrl: 'https://files.example',
+      emails: 'operator@example.com',
       fetch,
     })
 
-    expect(requests).toHaveLength(3)
+    expect(requests).toHaveLength(5)
     expect(requests[0]?.input.toString()).toContain(
       '/accounts/configured-account/access/apps',
     )
@@ -113,6 +134,7 @@ describe('Cloudflare preflight', () => {
       runCloudflarePreflight({
         apiToken: 'token',
         baseUrl: 'https://files.example',
+        emails: 'operator@example.com',
         fetch,
       }),
     ).rejects.toThrow(
@@ -122,15 +144,14 @@ describe('Cloudflare preflight', () => {
   })
 
   test('names the uncovered restricted namespace', async () => {
-    const { fetch } = createFetch([
-      jsonResponse([{ type: 'self_hosted', domain: 'files.example/r/*' }]),
-    ])
+    const { fetch } = createFetch([jsonResponse([application('r')])])
 
     await expect(
       runCloudflarePreflight({
         accountId: 'account-id',
         apiToken: 'token',
         baseUrl: 'https://files.example',
+        emails: 'operator@example.com',
         fetch,
       }),
     ).rejects.toThrow(
@@ -140,7 +161,9 @@ describe('Cloudflare preflight', () => {
 
   test('rejects ingress that routes the write prefix', async () => {
     const { fetch } = createFetch([
-      jsonResponse([{ type: 'self_hosted', domain: 'files.example' }]),
+      jsonResponse([application('r'), application('rt')]),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
       jsonResponse([tunnel]),
       jsonResponse({
         config: {
@@ -162,8 +185,64 @@ describe('Cloudflare preflight', () => {
         accountId: 'account-id',
         apiToken: 'token',
         baseUrl: 'https://files.example',
+        emails: 'operator@example.com',
         fetch,
       }),
     ).rejects.toThrow('tunnel ingress check: /w/ is routed on files.example')
+  })
+
+  test('rejects an owned policy that does not match the allowlist', async () => {
+    const { fetch } = createFetch([
+      jsonResponse([application('r'), application('rt')]),
+      jsonResponse([
+        policy('r', {
+          include: [{ email: { email: 'someone@example.net' } }],
+        }),
+      ]),
+    ])
+
+    await expect(
+      runCloudflarePreflight({
+        accountId: 'account-id',
+        apiToken: 'token',
+        baseUrl: 'https://files.example',
+        emails: 'operator@example.com',
+        fetch,
+      }),
+    ).rejects.toThrow(
+      'Access policy check: r policy does not match configuration',
+    )
+  })
+
+  test('rejects a covering application with an Everyone bypass', async () => {
+    const broadApplication = {
+      id: 'broad-app',
+      name: 'operator application',
+      type: 'self_hosted',
+      domain: 'files.example',
+    }
+    const { fetch } = createFetch([
+      jsonResponse([application('r'), application('rt'), broadApplication]),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
+      jsonResponse([
+        {
+          id: 'bypass-policy',
+          name: 'Public bypass',
+          decision: 'bypass',
+          include: [{ everyone: {} }],
+        },
+      ]),
+    ])
+
+    await expect(
+      runCloudflarePreflight({
+        accountId: 'account-id',
+        apiToken: 'token',
+        baseUrl: 'https://files.example',
+        emails: 'operator@example.com',
+        fetch,
+      }),
+    ).rejects.toThrow('Access policy check: an Everyone bypass covers r and rt')
   })
 })

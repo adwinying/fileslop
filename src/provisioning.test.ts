@@ -157,6 +157,7 @@ const provision = (fetcher: Fetch, overrides = {}) =>
     emailDomains: '@example.org',
     emails: ' operator@example.com ',
     fetch: fetcher,
+    port: 3000,
     sessionDuration: '24h',
     ...overrides,
   })
@@ -223,6 +224,9 @@ describe('Cloudflare Access provisioning', () => {
       },
     ])
     expect(requests.some(({ init }) => init?.method === 'DELETE')).toBe(false)
+    expect(
+      requests.every(({ init }) => init?.signal instanceof AbortSignal),
+    ).toBe(true)
     expect(JSON.stringify(applicationWrites.map(requestBody))).not.toContain(
       `${hostname}/p`,
     )
@@ -385,6 +389,77 @@ describe('Cloudflare Access provisioning', () => {
 
     expect(updatedIngress).toContainEqual(operatorRule)
     expect(requests.some(({ init }) => init?.method === 'DELETE')).toBe(false)
+  })
+
+  test('preserves unknown tunnel configuration fields', async () => {
+    const currentIngress = [
+      {
+        hostname: 'operator.example',
+        service: 'http://localhost:4000',
+        custom: { value: true },
+      },
+      { service: 'http_status:404' },
+    ]
+    const configuration = {
+      ingress: currentIngress,
+      'warp-routing': { enabled: true },
+    }
+    const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = []
+    const baseInfrastructure = createInfrastructure()
+    const infrastructure = (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString()
+
+      if (url.endsWith('/cfd_tunnel/tunnel-id/configurations')) {
+        requests.push({ input, init })
+        return jsonResponse({ config: configuration })
+      }
+
+      return baseInfrastructure(input, init)
+    }
+    const { fetch } = createFetch(
+      [
+        jsonResponse([application('r'), application('rt')]),
+        jsonResponse([policy('r')]),
+        jsonResponse([policy('rt')]),
+        jsonResponse([identityProvider()]),
+        jsonResponse(identityProvider()),
+      ],
+      infrastructure,
+    )
+
+    await provision(fetch)
+
+    const update = requests.find(({ init }) => init?.method === 'PUT')
+    const updatedConfig = requestBody(update!).config as Record<string, unknown>
+
+    expect(updatedConfig['warp-routing']).toEqual({ enabled: true })
+    expect((updatedConfig.ingress as unknown[])[0]).toEqual(currentIngress[0])
+  })
+
+  test('routes ingress to the configured server port', async () => {
+    const { fetch, requests } = createFetch([
+      jsonResponse([application('r'), application('rt')]),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
+      jsonResponse([identityProvider()]),
+      jsonResponse(identityProvider()),
+    ])
+
+    await provision(fetch, { port: 4000 })
+
+    const update = requests.find(
+      ({ input, init }) =>
+        input.toString().endsWith('/configurations') && init?.method === 'PUT',
+    )
+    const updatedIngress = (
+      requestBody(update!).config as { ingress: typeof ingress }
+    ).ingress
+
+    expect(
+      updatedIngress
+        .slice(0, 4)
+        .every((rule) => rule.service === 'http://localhost:4000'),
+    ).toBe(true)
   })
 
   test('reverts owned policy drift without targeting unrelated resources', async () => {
