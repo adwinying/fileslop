@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { tryTo } from '~/utils'
 
 const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4'
 
@@ -131,11 +132,8 @@ const ingressHostnameMatches = (
 const ingressPathMatches = (pattern: string | undefined, path: string) => {
   if (pattern === undefined) return true
 
-  try {
-    return new RegExp(pattern).test(path)
-  } catch {
-    return true
-  }
+  const [regex, error] = tryTo(() => new RegExp(pattern))
+  return error === null ? regex.test(path) : true
 }
 
 const routeFor = (
@@ -159,16 +157,16 @@ const getJson = async <Schema extends z.ZodType>(
   schema: Schema,
   check: string,
 ) => {
-  let response: Response
-
-  try {
-    response = await fetcher(url, {
+  const [response, requestError] = await tryTo(
+    fetcher(url, {
       method: 'GET',
       headers: { authorization: `Bearer ${apiToken}` },
-    })
-  } catch (error) {
+    }),
+  )
+
+  if (requestError !== null) {
     throw new Error(`Cloudflare preflight failed: ${check}: request failed`, {
-      cause: error,
+      cause: requestError,
     })
   }
 
@@ -178,14 +176,12 @@ const getJson = async <Schema extends z.ZodType>(
     )
   }
 
-  let body: unknown
+  const [body, jsonError] = await tryTo(response.json() as Promise<unknown>)
 
-  try {
-    body = await response.json()
-  } catch (error) {
+  if (jsonError !== null) {
     throw new Error(
       `Cloudflare preflight failed: ${check}: invalid JSON response`,
-      { cause: error },
+      { cause: jsonError },
     )
   }
 

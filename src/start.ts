@@ -3,6 +3,7 @@ import { createApp } from '~/app'
 import { createEnvironment } from '~/env'
 import { runCloudflarePreflight } from '~/preflight'
 import { runCloudflareProvisioning } from '~/provisioning'
+import { tryTo } from '~/utils'
 
 type StartOptions = {
   fetch?: Fetch
@@ -18,8 +19,8 @@ export const start = async ({
   console.log(`Cloudflare mode: ${cloudflareActive ? 'active' : 'inactive'}`)
 
   if (config.CLOUDFLARE_API_TOKEN) {
-    try {
-      const provisioning = await runCloudflareProvisioning({
+    const [provisioning, provisioningError] = await tryTo(
+      runCloudflareProvisioning({
         accountId: config.CLOUDFLARE_ACCOUNT_ID,
         apiToken: config.CLOUDFLARE_API_TOKEN,
         baseUrl: config.BASE_URL,
@@ -28,10 +29,13 @@ export const start = async ({
         fetch: fetcher,
         identityProviders: config.ACCESS_IDPS,
         sessionDuration: config.ACCESS_SESSION_DURATION,
-      })
+      }),
+    )
+
+    if (provisioningError === null) {
       tunnelToken = provisioning.tunnelToken
-    } catch (error) {
-      console.error(error instanceof Error ? error.message : error)
+    } else {
+      console.error(provisioningError.message)
     }
 
     await runCloudflarePreflight({

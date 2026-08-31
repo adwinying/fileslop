@@ -1,3 +1,4 @@
+import { tryTo } from '~/utils'
 import { VerificationError, verifyExternal, verifyInternal } from '~/verify'
 
 const usage = `Usage:
@@ -30,9 +31,9 @@ const main = async () => {
   throw new VerificationError(usage)
 }
 
-try {
-  await main()
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error)
+const [, error] = await tryTo(main())
+
+if (error !== null) {
+  console.error(error.message)
   process.exitCode = 1
 }

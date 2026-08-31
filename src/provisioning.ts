@@ -1,5 +1,6 @@
 import type { Fetch } from '~/preflight'
 import { z } from 'zod'
+import { tryTo } from '~/utils'
 
 const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4'
 const namespaces = ['r', 'rt'] as const
@@ -161,31 +162,31 @@ const cloudflareRequest = async <Schema extends z.ZodType>({
   task,
   verbatimApiError = false,
 }: CloudflareRequestOptions<Schema>) => {
-  let response: Response
-
-  try {
-    response = await fetcher(`${CLOUDFLARE_API_URL}${path}`, {
+  const [response, requestError] = await tryTo(
+    fetcher(`${CLOUDFLARE_API_URL}${path}`, {
       method,
       headers: {
         authorization: `Bearer ${apiToken}`,
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    })
-  } catch (error) {
+    }),
+  )
+
+  if (requestError !== null) {
     throw new Error(`Cloudflare provisioning failed: ${task}: request failed`, {
-      cause: error,
+      cause: requestError,
     })
   }
 
-  let responseBody: unknown
+  const [responseBody, jsonError] = await tryTo(
+    response.json() as Promise<unknown>,
+  )
 
-  try {
-    responseBody = await response.json()
-  } catch (error) {
+  if (jsonError !== null) {
     throw new Error(
       `Cloudflare provisioning failed: ${task}: invalid JSON response`,
-      { cause: error },
+      { cause: jsonError },
     )
   }
 

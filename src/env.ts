@@ -1,20 +1,23 @@
 import { createEnv } from '@t3-oss/env-core'
 import { z } from 'zod'
+import { tryTo } from '~/utils'
 
 const DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 const DEFAULT_TEMP_TTL = 24 * 60 * 60 * 1000
 const accessIdpsSchema = z
   .string()
   .transform((value, context): unknown => {
-    try {
-      return JSON.parse(value)
-    } catch {
+    const [parsed, error] = tryTo(() => JSON.parse(value) as unknown)
+
+    if (error !== null) {
       context.addIssue({
         code: 'custom',
         message: 'ACCESS_IDPS must be valid JSON',
       })
       return z.NEVER
     }
+
+    return parsed
   })
   .pipe(
     z.array(

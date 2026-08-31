@@ -1,3 +1,5 @@
+import { tryTo } from '~/utils'
+
 type Fetcher = (
   input: string | URL | Request,
   init?: RequestInit,
@@ -44,16 +46,13 @@ const isAccessChallenge = (response: Response) => {
   const location = response.headers.get('location')
   if (location === null) return false
 
-  try {
-    const url = new URL(location)
+  const [url, error] = tryTo(() => new URL(location))
+  if (error !== null) return false
 
-    return (
-      url.hostname.endsWith('.cloudflareaccess.com') &&
-      url.pathname.startsWith('/cdn-cgi/access/login/')
-    )
-  } catch {
-    return false
-  }
+  return (
+    url.hostname.endsWith('.cloudflareaccess.com') &&
+    url.pathname.startsWith('/cdn-cgi/access/login/')
+  )
 }
 
 const describeError = (error: unknown) =>
@@ -125,18 +124,16 @@ export const verifyInternal = async ({
 }: InternalVerifyOptions) => {
   const results = await Promise.all(
     namespaces.map(async (namespace) => {
-      try {
-        const response = await request(
-          fetcher,
-          urlFor(originUrl, `/w/${namespace}`),
-          timeoutMs,
-          { method: 'POST', body: new FormData() },
-        )
+      const [response, error] = await tryTo(
+        request(fetcher, urlFor(originUrl, `/w/${namespace}`), timeoutMs, {
+          method: 'POST',
+          body: new FormData(),
+        }),
+      )
 
-        return { namespace, response } as const
-      } catch (error) {
-        return { namespace, error } as const
-      }
+      return error === null
+        ? ({ namespace, response } as const)
+        : ({ namespace, error } as const)
     }),
   )
   const responses = results.filter((result) => 'response' in result)
