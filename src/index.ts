@@ -1,5 +1,3 @@
-import { createApp } from '~/app'
+import { start } from '~/start'
 
-const app = createApp({ logRequests: true }).listen(3000)
-
-console.log(`fileslop is listening on ${app.server?.url}`)
+await start()

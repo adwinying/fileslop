@@ -1,0 +1,59 @@
+name: Verify deployment
+
+on:
+  workflow_call:
+    secrets:
+      TS_OAUTH_CLIENT_ID:
+        description: Tailscale OAuth client ID
+        required: true
+      TS_OAUTH_SECRET:
+        description: Tailscale OAuth client secret
+        required: true
+  workflow_dispatch:
+
+jobs:
+  external:
+    name: External behaviour
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@v4
+
+      - name: Verify from outside the tailnet
+        run: bun run verify:external "$DEPLOYED_URL"
+        env:
+          DEPLOYED_URL: ${{ vars.DEPLOYED_URL }}
+
+  internal:
+    name: Tailnet write paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+
+      - name: Verify from inside the tailnet
+        run: bun run verify:internal "$ORIGIN_URL"
+        env:
+          ORIGIN_URL: ${{ vars.ORIGIN_URL }}
