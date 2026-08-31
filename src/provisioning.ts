@@ -26,6 +26,14 @@ const policySchema = z.object({
   decision: z.string(),
   include: z.array(z.record(z.string(), z.unknown())),
 })
+const identityProviderSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  type: z.string(),
+})
+const identityProviderSchema = identityProviderSummarySchema.extend({
+  config: z.record(z.string(), z.unknown()),
+})
 
 const responseSchema = <Result extends z.ZodType>(result: Result) =>
   z.object({
@@ -42,6 +50,16 @@ const applicationListSchema = responseSchema(z.array(applicationSchema))
 const applicationSchemaResponse = responseSchema(applicationSchema)
 const policyListSchema = responseSchema(z.array(policySchema))
 const policySchemaResponse = responseSchema(policySchema)
+const identityProviderListSchema = responseSchema(
+  z.array(identityProviderSummarySchema),
+)
+const identityProviderSchemaResponse = responseSchema(identityProviderSchema)
+
+type IdentityProvider = {
+  name: string
+  type: string
+  config: Record<string, unknown>
+}
 
 type ProvisioningOptions = {
   accountId?: string
@@ -50,6 +68,7 @@ type ProvisioningOptions = {
   emailDomains?: string
   emails?: string
   fetch: Fetch
+  identityProviders?: IdentityProvider[]
   sessionDuration: string
 }
 
@@ -61,6 +80,7 @@ type CloudflareRequestOptions<Schema extends z.ZodType> = {
   path: string
   schema: Schema
   task: string
+  verbatimApiError?: boolean
 }
 
 type AccessRule =
@@ -78,6 +98,9 @@ const ownedApplicationName = (hostname: string, namespace: 'r' | 'rt') =>
 const ownedPolicyName = (hostname: string, namespace: 'r' | 'rt') =>
   `${ownedApplicationName(hostname, namespace)}:allow`
 
+const ownedIdentityProviderName = (hostname: string, name: string) =>
+  `fileslop:${hostname}:idp:${name}`
+
 const parseCloudflareErrors = (body: unknown) => {
   const result = z.object({ errors: z.array(apiErrorSchema) }).safeParse(body)
 
@@ -94,6 +117,7 @@ const cloudflareRequest = async <Schema extends z.ZodType>({
   path,
   schema,
   task,
+  verbatimApiError = false,
 }: CloudflareRequestOptions<Schema>) => {
   let response: Response
 
@@ -125,6 +149,11 @@ const cloudflareRequest = async <Schema extends z.ZodType>({
 
   if (!response.ok) {
     const cloudflareErrors = parseCloudflareErrors(responseBody)
+
+    if (verbatimApiError && cloudflareErrors) {
+      throw new Error(cloudflareErrors)
+    }
+
     throw new Error(
       `Cloudflare provisioning failed: ${task}: ${
         cloudflareErrors || `Cloudflare returned ${response.status}`
@@ -142,6 +171,113 @@ const cloudflareRequest = async <Schema extends z.ZodType>({
   }
 
   return result.data as z.output<Schema>
+}
+
+const canonicalJson = (value: unknown): string => {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value).sort(([left], [right]) =>
+      left.localeCompare(right),
+    )
+
+    return `{${entries
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(',')}}`
+  }
+
+  return JSON.stringify(value) ?? 'undefined'
+}
+
+const reconcileIdentityProviders = async ({
+  accountId,
+  apiToken,
+  fetch: fetcher,
+  hostname,
+  identityProviders,
+}: {
+  accountId: string
+  apiToken: string
+  fetch: Fetch
+  hostname: string
+  identityProviders: IdentityProvider[]
+}) => {
+  const path = `/accounts/${accountId}/access/identity_providers`
+  const response = await cloudflareRequest({
+    apiToken,
+    fetch: fetcher,
+    method: 'GET',
+    path: `${path}?per_page=1000`,
+    schema: identityProviderListSchema,
+    task: 'identity provider lookup',
+  })
+  assertCompleteList(
+    response.result.length,
+    response.result_info?.total_count,
+    'identity provider lookup',
+  )
+
+  const desiredProviders = [
+    { name: 'One-time PIN', type: 'onetimepin', config: {} },
+    ...identityProviders,
+  ]
+
+  for (const provider of desiredProviders) {
+    const name = ownedIdentityProviderName(hostname, provider.name)
+    const ownedProviders = response.result.filter(
+      (candidate) => candidate.name === name,
+    )
+
+    if (ownedProviders.length > 1) {
+      throw new Error(
+        `Cloudflare provisioning failed: identity provider lookup: more than one owned provider exists for ${name}`,
+      )
+    }
+
+    const desired = { ...provider, name }
+    const current = ownedProviders[0]
+
+    if (!current) {
+      await cloudflareRequest({
+        apiToken,
+        body: desired,
+        fetch: fetcher,
+        method: 'POST',
+        path,
+        schema: identityProviderSchemaResponse,
+        task: `${provider.name} identity provider creation`,
+        verbatimApiError: true,
+      })
+      continue
+    }
+
+    const detail = await cloudflareRequest({
+      apiToken,
+      fetch: fetcher,
+      method: 'GET',
+      path: `${path}/${current.id}`,
+      schema: identityProviderSchemaResponse,
+      task: `${provider.name} identity provider lookup`,
+    })
+
+    if (
+      detail.result.type !== desired.type ||
+      canonicalJson(detail.result.config) !== canonicalJson(desired.config)
+    ) {
+      await cloudflareRequest({
+        apiToken,
+        body: desired,
+        fetch: fetcher,
+        method: 'PUT',
+        path: `${path}/${current.id}`,
+        schema: identityProviderSchemaResponse,
+        task: `${provider.name} identity provider update`,
+        verbatimApiError: true,
+      })
+    }
+  }
 }
 
 const assertCompleteList = (
@@ -297,6 +433,7 @@ export const runCloudflareProvisioning = async ({
   emailDomains,
   emails,
   fetch: fetcher,
+  identityProviders = [],
   sessionDuration,
 }: ProvisioningOptions) => {
   const resolvedAccountId =
@@ -376,4 +513,12 @@ export const runCloudflareProvisioning = async ({
       namespace,
     })
   }
+
+  await reconcileIdentityProviders({
+    accountId: resolvedAccountId,
+    apiToken,
+    fetch: fetcher,
+    hostname,
+    identityProviders,
+  })
 }

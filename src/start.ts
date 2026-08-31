@@ -25,6 +25,7 @@ export const start = async ({
         emailDomains: config.ACCESS_EMAIL_DOMAINS,
         emails: config.ACCESS_EMAILS,
         fetch: fetcher,
+        identityProviders: config.ACCESS_IDPS,
         sessionDuration: config.ACCESS_SESSION_DURATION,
       })
     } catch (error) {

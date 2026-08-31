@@ -149,6 +149,16 @@ describe('startup', () => {
       decision: 'allow',
       include: [{ email: { email: 'operator@example.com' } }],
     })
+    const identityProvider = (
+      name: string,
+      type: string,
+      config: Record<string, unknown>,
+    ) => ({
+      id: `${type}-idp`,
+      name: `fileslop:files.example:idp:${name}`,
+      type,
+      config,
+    })
     const responses = [
       [],
       app('r'),
@@ -157,6 +167,9 @@ describe('startup', () => {
       app('rt'),
       [],
       policy('rt'),
+      [],
+      identityProvider('One-time PIN', 'onetimepin', {}),
+      identityProvider('Company SSO', 'oidc', { client_id: 'client-id' }),
       [app('r'), app('rt')],
     ].map((result) =>
       Response.json({ success: true, errors: [], messages: [], result }),
@@ -167,11 +180,18 @@ describe('startup', () => {
       CLOUDFLARE_API_TOKEN: 'token',
       CLOUDFLARE_ACCOUNT_ID: 'account-id',
       ACCESS_EMAILS: 'operator@example.com',
+      ACCESS_IDPS: JSON.stringify([
+        {
+          name: 'Company SSO',
+          type: 'oidc',
+          config: { client_id: 'client-id' },
+        },
+      ]),
     })
 
     await start({ fetch })
 
-    expect(fetch).toHaveBeenCalledTimes(8)
+    expect(fetch).toHaveBeenCalledTimes(11)
   })
 
   test('rejects a token with no Access allowlist during validation', async () => {

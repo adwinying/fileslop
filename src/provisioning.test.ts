@@ -26,6 +26,18 @@ const policy = (
   include,
 })
 
+const identityProvider = (
+  name = 'One-time PIN',
+  type = 'onetimepin',
+  config: Record<string, unknown> = {},
+  id = `${type}-idp`,
+) => ({
+  id,
+  name: `fileslop:${hostname}:idp:${name}`,
+  type,
+  config,
+})
+
 const jsonResponse = (result: unknown, totalCount?: number) =>
   Response.json({
     success: true,
@@ -74,6 +86,8 @@ describe('Cloudflare Access provisioning', () => {
       jsonResponse(application('rt')),
       jsonResponse([]),
       jsonResponse(policy('rt')),
+      jsonResponse([]),
+      jsonResponse(identityProvider()),
     ])
 
     await provision(fetch)
@@ -124,6 +138,11 @@ describe('Cloudflare Access provisioning', () => {
     expect(JSON.stringify(applicationWrites.map(requestBody))).not.toContain(
       `${hostname}/p`,
     )
+    expect(writes.map(requestBody)).toContainEqual({
+      name: `fileslop:${hostname}:idp:One-time PIN`,
+      type: 'onetimepin',
+      config: {},
+    })
   })
 
   test('does not create a second set when provisioning runs again', async () => {
@@ -136,9 +155,13 @@ describe('Cloudflare Access provisioning', () => {
       jsonResponse(application('rt')),
       jsonResponse([]),
       jsonResponse(policy('rt')),
+      jsonResponse([]),
+      jsonResponse(identityProvider()),
       jsonResponse(currentApplications),
       jsonResponse([policy('r')]),
       jsonResponse([policy('rt')]),
+      jsonResponse([identityProvider()]),
+      jsonResponse(identityProvider()),
     ])
 
     await provision(fetch)
@@ -151,7 +174,7 @@ describe('Cloudflare Access provisioning', () => {
         .every(({ init }) => init?.method === 'GET'),
     ).toBe(true)
     expect(requests.filter(({ init }) => init?.method === 'POST')).toHaveLength(
-      4,
+      5,
     )
   })
 
@@ -185,6 +208,8 @@ describe('Cloudflare Access provisioning', () => {
       ]),
       jsonResponse(policy('r')),
       jsonResponse([policy('rt')]),
+      jsonResponse([]),
+      jsonResponse(identityProvider()),
     ])
 
     await provision(fetch)
@@ -213,6 +238,8 @@ describe('Cloudflare Access provisioning', () => {
       jsonResponse(policy('r', [])),
       jsonResponse([policy('rt')]),
       jsonResponse(policy('rt', [])),
+      jsonResponse([]),
+      jsonResponse(identityProvider()),
     ])
 
     await provision(fetch, { emailDomains: ' , ', emails: '' })
@@ -224,5 +251,120 @@ describe('Cloudflare Access provisioning', () => {
         .map(requestBody)
         .every((body) => JSON.stringify(body.include) === '[]'),
     ).toBe(true)
+  })
+
+  test('creates One-time PIN and passes provider config through unchanged', async () => {
+    const config = {
+      client_secret: 'secret',
+      client_id: 'client-id',
+      nested: { prompt: 'login', claims: ['email', 'groups'] },
+    }
+    const { fetch, requests } = createFetch([
+      jsonResponse([application('r'), application('rt')]),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
+      jsonResponse([]),
+      jsonResponse(identityProvider()),
+      jsonResponse(identityProvider('Company SSO', 'oidc', config)),
+    ])
+
+    await provision(fetch, {
+      identityProviders: [{ name: 'Company SSO', type: 'oidc', config }],
+    })
+
+    const providerWrites = requests
+      .filter(({ input }) =>
+        input.toString().includes('/access/identity_providers'),
+      )
+      .filter(({ init }) => init?.method === 'POST')
+      .map(requestBody)
+
+    expect(providerWrites).toEqual([
+      {
+        name: `fileslop:${hostname}:idp:One-time PIN`,
+        type: 'onetimepin',
+        config: {},
+      },
+      {
+        name: `fileslop:${hostname}:idp:Company SSO`,
+        type: 'oidc',
+        config,
+      },
+    ])
+    expect(providerWrites[1]?.config).toEqual(config)
+  })
+
+  test('reconciles owned provider drift and leaves removed providers alone', async () => {
+    const desiredConfig = { client_id: 'configured' }
+    const { fetch, requests } = createFetch([
+      jsonResponse([application('r'), application('rt')]),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
+      jsonResponse([
+        identityProvider(),
+        identityProvider('Company SSO', 'oidc', { client_id: 'dashboard' }),
+        identityProvider('Removed SSO', 'github', { client_id: 'old' }),
+        {
+          id: 'unowned-idp',
+          name: 'Operator provider',
+          type: 'github',
+        },
+      ]),
+      jsonResponse(identityProvider()),
+      jsonResponse(
+        identityProvider('Company SSO', 'oidc', { client_id: 'dashboard' }),
+      ),
+      jsonResponse(identityProvider('Company SSO', 'oidc', desiredConfig)),
+    ])
+
+    await provision(fetch, {
+      identityProviders: [
+        { name: 'Company SSO', type: 'oidc', config: desiredConfig },
+      ],
+    })
+
+    const writes = requests.filter(
+      ({ init }) => init?.method === 'POST' || init?.method === 'PUT',
+    )
+    expect(writes).toHaveLength(1)
+    expect(writes[0]?.input.toString()).toEndWith(
+      '/access/identity_providers/oidc-idp',
+    )
+    expect(requestBody(writes[0]!)).toEqual({
+      name: `fileslop:${hostname}:idp:Company SSO`,
+      type: 'oidc',
+      config: desiredConfig,
+    })
+    expect(requests.some(({ init }) => init?.method === 'DELETE')).toBe(false)
+    expect(
+      requests.map(({ input }) => input.toString()).join('\n'),
+    ).not.toContain('unowned-idp')
+  })
+
+  test('surfaces a rejected provider config verbatim', async () => {
+    const cloudflareError = 'client_secret is invalid for this provider'
+    const { fetch } = createFetch([
+      jsonResponse([application('r'), application('rt')]),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
+      jsonResponse([identityProvider()]),
+      jsonResponse(identityProvider()),
+      Response.json(
+        {
+          success: false,
+          errors: [{ message: cloudflareError }],
+          result: null,
+        },
+        { status: 400 },
+      ),
+    ])
+
+    await expect(
+      provision(fetch, {
+        identityProviders: [
+          { name: 'Broken SSO', type: 'oidc', config: { bad: true } },
+        ],
+      }),
+    ).rejects.toThrow(new Error(cloudflareError))
   })
 })
