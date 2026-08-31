@@ -5,12 +5,40 @@ import { runCloudflarePreflight } from '~/preflight'
 import { runCloudflareProvisioning } from '~/provisioning'
 import { tryTo } from '~/utils'
 
-type StartOptions = {
+export type StartOptions = {
   fetch?: Fetch
+  listen?: Listen
+  port?: number
+  spawn?: Spawn
 }
+
+type Listen = (app: ReturnType<typeof createApp>, port: number) => void
+
+export type Spawn = (
+  command: string[],
+  options: {
+    env: Record<string, string | undefined>
+    stderr: 'inherit'
+    stdout: 'inherit'
+    onExit: (exitCode: number | null) => void
+  },
+) => unknown
+
+const spawnProcess: Spawn = (command, options) =>
+  Bun.spawn(command, {
+    env: options.env,
+    stderr: options.stderr,
+    stdout: options.stdout,
+    onExit: (_process, exitCode) => options.onExit(exitCode),
+  })
+
+const listen: Listen = (app, port) => app.listen(port)
 
 export const start = async ({
   fetch: fetcher = globalThis.fetch,
+  listen: startListening = listen,
+  port = 3000,
+  spawn = spawnProcess,
 }: StartOptions = {}) => {
   const config = createEnvironment(process.env)
   const cloudflareActive = config.CLOUDFLARE_API_TOKEN !== undefined
@@ -46,13 +74,25 @@ export const start = async ({
     })
   }
 
-  return {
-    app: createApp({
-      storageRoot: config.STORAGE_ROOT,
-      baseUrl: config.BASE_URL,
-      maxUploadBytes: config.MAX_UPLOAD_BYTES,
-      logRequests: true,
-    }),
-    tunnelToken,
+  const app = createApp({
+    storageRoot: config.STORAGE_ROOT,
+    baseUrl: config.BASE_URL,
+    maxUploadBytes: config.MAX_UPLOAD_BYTES,
+    logRequests: true,
+  })
+
+  startListening(app, port)
+
+  console.log(`fileslop is listening on ${app.server?.url}`)
+
+  if (tunnelToken) {
+    spawn(['cloudflared', 'tunnel', '--no-autoupdate', 'run'], {
+      env: { ...process.env, TUNNEL_TOKEN: tunnelToken },
+      stderr: 'inherit',
+      stdout: 'inherit',
+      onExit: (exitCode) => process.exit(exitCode ?? 1),
+    })
   }
+
+  return { app }
 }

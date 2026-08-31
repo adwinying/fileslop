@@ -1,3 +1,4 @@
+import type { Spawn, StartOptions } from '~/start'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +11,17 @@ const { start } = await import('~/start')
 
 const temporaryDirectories: string[] = []
 const hostname = 'files.example'
+
+const startServer = async (options: StartOptions = {}) => {
+  const spawn = options.spawn ?? mock(() => undefined)
+  const result = await start({
+    listen: () => undefined,
+    ...options,
+    spawn,
+  })
+
+  return { ...result, spawn }
+}
 
 const application = (namespace: 'r' | 'rt') => ({
   id: `${namespace}-app`,
@@ -157,9 +169,10 @@ describe('startup', () => {
     })
     await configureStartup()
 
-    await start({ fetch })
+    const { spawn } = await startServer({ fetch })
 
     expect(fetch).not.toHaveBeenCalled()
+    expect(spawn).not.toHaveBeenCalled()
     expect(log).toHaveBeenCalledWith('Cloudflare mode: inactive')
   })
 
@@ -195,17 +208,24 @@ describe('startup', () => {
       ACCESS_EMAILS: 'operator@example.com',
     })
 
-    await expect(start({ fetch })).rejects.toThrow(
+    await expect(startServer({ fetch })).rejects.toThrow(
       'tunnel ingress check: /w/ is routed',
     )
 
     expect(fetch).toHaveBeenCalledTimes(4)
   })
 
-  test('logs active Cloudflare mode once', async () => {
+  test('starts and supervises cloudflared without exposing its token', async () => {
     const log = spyOn(console, 'log').mockImplementation(() => undefined)
-    spyOn(console, 'error').mockImplementation(() => undefined)
+    const error = spyOn(console, 'error').mockImplementation(() => undefined)
     const fetch = existingCloudflareFetch()
+    let childExit: Parameters<Spawn>[1]['onExit'] | undefined
+    let listeningWhenSpawned = false
+    let listening = false
+    const spawn = mock((_command: string[], options: Parameters<Spawn>[1]) => {
+      listeningWhenSpawned = listening
+      childExit = options.onExit
+    })
 
     await configureStartup({
       CLOUDFLARE_API_TOKEN: 'token',
@@ -213,15 +233,36 @@ describe('startup', () => {
       ACCESS_EMAILS: 'operator@example.com',
     })
 
-    const result = await start({ fetch })
+    await startServer({
+      fetch,
+      listen: () => {
+        listening = true
+      },
+      spawn,
+    })
 
     expect(
       log.mock.calls.filter(([message]) =>
         String(message).startsWith('Cloudflare mode:'),
       ),
     ).toEqual([['Cloudflare mode: active']])
-    expect(result.tunnelToken).toBe('tunnel-token')
-    expect(JSON.stringify(log.mock.calls)).not.toContain('tunnel-token')
+    expect(spawn).toHaveBeenCalledTimes(1)
+    const [command, options] = spawn.mock.calls[0]!
+    expect(command).toEqual(['cloudflared', 'tunnel', '--no-autoupdate', 'run'])
+    expect(command).not.toContain('tunnel-token')
+    expect(options.env.TUNNEL_TOKEN).toBe('tunnel-token')
+    expect(JSON.stringify([log.mock.calls, error.mock.calls])).not.toContain(
+      'tunnel-token',
+    )
+    expect(listeningWhenSpawned).toBe(true)
+
+    const exit = spyOn(process, 'exit').mockImplementation(
+      () => undefined as never,
+    )
+    childExit?.(23)
+
+    expect(exit).toHaveBeenCalledWith(23)
+    expect(spawn).toHaveBeenCalledTimes(1)
   })
 
   test('runs preflight after provisioning fails', async () => {
@@ -252,7 +293,7 @@ describe('startup', () => {
       ACCESS_EMAILS: 'operator@example.com',
     })
 
-    await start({ fetch })
+    await startServer({ fetch })
 
     expect(fetch).toHaveBeenCalledTimes(4)
     expect(error).toHaveBeenCalledWith(
@@ -297,7 +338,7 @@ describe('startup', () => {
       ]),
     })
 
-    await start({ fetch })
+    await startServer({ fetch })
 
     expect(fetch).toHaveBeenCalledTimes(18)
   })
@@ -306,7 +347,7 @@ describe('startup', () => {
     spyOn(console, 'error').mockImplementation(() => undefined)
     await configureStartup({ CLOUDFLARE_API_TOKEN: 'token' })
 
-    await expect(start()).rejects.toThrow('Invalid environment variables')
+    await expect(startServer()).rejects.toThrow('Invalid environment variables')
   })
 
   test('parses the ACCESS_IDPS JSON envelope without changing config', () => {
