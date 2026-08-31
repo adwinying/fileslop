@@ -56,6 +56,8 @@ Creating and updating the Cloudflare resources that ADR-0001 relies on: the tunn
 
 Reconciliation is bounded by ownership. Provisioning only touches resources fileslop created, and it never deletes — narrowing the allowed emails rewrites a policy rather than removing an application.
 
+Access applications are named `fileslop:<hostname>:r` and `fileslop:<hostname>:rt`; their policies append `:allow`. These names mark the resources Provisioning owns.
+
 ### Preflight
 
 The read-only check that runs on every startup, asking whether the Cloudflare *configuration* is correct: an Access application covers `r` and `rt`, its policy carries the expected rules, and the tunnel ingress has no route to `/w/`. It reads the Cloudflare API and never writes. A failed preflight stops the process from starting.

@@ -2,6 +2,7 @@ import type { Fetch } from '~/preflight'
 import { createApp } from '~/app'
 import { createEnvironment } from '~/env'
 import { runCloudflarePreflight } from '~/preflight'
+import { runCloudflareProvisioning } from '~/provisioning'
 
 type StartOptions = {
   fetch?: Fetch
@@ -16,6 +17,20 @@ export const start = async ({
   console.log(`Cloudflare mode: ${cloudflareActive ? 'active' : 'inactive'}`)
 
   if (config.CLOUDFLARE_API_TOKEN) {
+    try {
+      await runCloudflareProvisioning({
+        accountId: config.CLOUDFLARE_ACCOUNT_ID,
+        apiToken: config.CLOUDFLARE_API_TOKEN,
+        baseUrl: config.BASE_URL,
+        emailDomains: config.ACCESS_EMAIL_DOMAINS,
+        emails: config.ACCESS_EMAILS,
+        fetch: fetcher,
+        sessionDuration: config.ACCESS_SESSION_DURATION,
+      })
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error)
+    }
+
     await runCloudflarePreflight({
       accountId: config.CLOUDFLARE_ACCOUNT_ID,
       apiToken: config.CLOUDFLARE_API_TOKEN,

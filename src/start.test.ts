@@ -53,6 +53,7 @@ describe('startup', () => {
 
   test('runs preflight before listening', async () => {
     spyOn(console, 'log').mockImplementation(() => undefined)
+    spyOn(console, 'error').mockImplementation(() => undefined)
     const fetch = mock(async () =>
       Response.json({
         success: true,
@@ -72,11 +73,12 @@ describe('startup', () => {
       'Access application coverage check',
     )
 
-    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   test('logs active Cloudflare mode once', async () => {
     const log = spyOn(console, 'log').mockImplementation(() => undefined)
+    spyOn(console, 'error').mockImplementation(() => undefined)
     const fetch = mock(async () =>
       Response.json({
         success: true,
@@ -99,6 +101,77 @@ describe('startup', () => {
         String(message).startsWith('Cloudflare mode:'),
       ),
     ).toEqual([['Cloudflare mode: active']])
+  })
+
+  test('runs preflight after provisioning fails', async () => {
+    spyOn(console, 'log').mockImplementation(() => undefined)
+    const error = spyOn(console, 'error').mockImplementation(() => undefined)
+    const responses = [
+      Response.json(
+        { success: false, errors: [{ message: 'temporary outage' }] },
+        { status: 503 },
+      ),
+      Response.json({
+        success: true,
+        errors: [],
+        messages: [],
+        result: [{ type: 'self_hosted', domain: 'files.example' }],
+      }),
+    ]
+    const fetch = mock(async () => responses.shift()!)
+
+    await configureStartup({
+      CLOUDFLARE_API_TOKEN: 'token',
+      CLOUDFLARE_ACCOUNT_ID: 'account-id',
+      ACCESS_EMAILS: 'operator@example.com',
+    })
+
+    await start({ fetch })
+
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(error).toHaveBeenCalledWith(
+      'Cloudflare provisioning failed: Access application lookup: temporary outage',
+    )
+  })
+
+  test('preflight accepts applications created by provisioning', async () => {
+    spyOn(console, 'log').mockImplementation(() => undefined)
+    const app = (namespace: 'r' | 'rt') => ({
+      id: `${namespace}-app`,
+      name: `fileslop:files.example:${namespace}`,
+      type: 'self_hosted',
+      destinations: [{ type: 'public', uri: `files.example/${namespace}/*` }],
+      session_duration: '24h',
+    })
+    const policy = (namespace: 'r' | 'rt') => ({
+      id: `${namespace}-policy`,
+      name: `fileslop:files.example:${namespace}:allow`,
+      decision: 'allow',
+      include: [{ email: { email: 'operator@example.com' } }],
+    })
+    const responses = [
+      [],
+      app('r'),
+      [],
+      policy('r'),
+      app('rt'),
+      [],
+      policy('rt'),
+      [app('r'), app('rt')],
+    ].map((result) =>
+      Response.json({ success: true, errors: [], messages: [], result }),
+    )
+    const fetch = mock(async () => responses.shift()!)
+
+    await configureStartup({
+      CLOUDFLARE_API_TOKEN: 'token',
+      CLOUDFLARE_ACCOUNT_ID: 'account-id',
+      ACCESS_EMAILS: 'operator@example.com',
+    })
+
+    await start({ fetch })
+
+    expect(fetch).toHaveBeenCalledTimes(8)
   })
 
   test('rejects a token with no Access allowlist during validation', async () => {
