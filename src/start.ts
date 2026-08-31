@@ -13,12 +13,13 @@ export const start = async ({
 }: StartOptions = {}) => {
   const config = createEnvironment(process.env)
   const cloudflareActive = config.CLOUDFLARE_API_TOKEN !== undefined
+  let tunnelToken: string | undefined
 
   console.log(`Cloudflare mode: ${cloudflareActive ? 'active' : 'inactive'}`)
 
   if (config.CLOUDFLARE_API_TOKEN) {
     try {
-      await runCloudflareProvisioning({
+      const provisioning = await runCloudflareProvisioning({
         accountId: config.CLOUDFLARE_ACCOUNT_ID,
         apiToken: config.CLOUDFLARE_API_TOKEN,
         baseUrl: config.BASE_URL,
@@ -28,6 +29,7 @@ export const start = async ({
         identityProviders: config.ACCESS_IDPS,
         sessionDuration: config.ACCESS_SESSION_DURATION,
       })
+      tunnelToken = provisioning.tunnelToken
     } catch (error) {
       console.error(error instanceof Error ? error.message : error)
     }
@@ -40,10 +42,13 @@ export const start = async ({
     })
   }
 
-  return createApp({
-    storageRoot: config.STORAGE_ROOT,
-    baseUrl: config.BASE_URL,
-    maxUploadBytes: config.MAX_UPLOAD_BYTES,
-    logRequests: true,
-  })
+  return {
+    app: createApp({
+      storageRoot: config.STORAGE_ROOT,
+      baseUrl: config.BASE_URL,
+      maxUploadBytes: config.MAX_UPLOAD_BYTES,
+      logRequests: true,
+    }),
+    tunnelToken,
+  }
 }

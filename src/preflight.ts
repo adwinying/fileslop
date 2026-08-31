@@ -29,6 +29,34 @@ const applicationResponseSchema = z.object({
     .object({ total_count: z.number().int().nonnegative().optional() })
     .optional(),
 })
+const tunnelResponseSchema = z.object({
+  success: z.literal(true),
+  errors: z.array(apiErrorSchema),
+  result: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      config_src: z.string().optional(),
+    }),
+  ),
+  result_info: z
+    .object({ total_count: z.number().int().nonnegative().optional() })
+    .optional(),
+})
+const ingressRuleSchema = z.object({
+  hostname: z.string().optional(),
+  path: z.string().optional(),
+  service: z.string(),
+})
+const tunnelConfigurationResponseSchema = z.object({
+  success: z.literal(true),
+  errors: z.array(apiErrorSchema),
+  result: z.object({
+    config: z
+      .object({ ingress: z.array(ingressRuleSchema).optional() })
+      .optional(),
+  }),
+})
 
 export type Fetch = (
   input: RequestInfo | URL,
@@ -92,6 +120,37 @@ const getApplicationDestinations = (
 
   return application.domain ? [application.domain] : []
 }
+
+const ingressHostnameMatches = (
+  pattern: string | undefined,
+  hostname: string,
+) =>
+  pattern === undefined ||
+  new RegExp(`^${wildcardRegex(pattern, '[^.]*')}$`, 'i').test(hostname)
+
+const ingressPathMatches = (pattern: string | undefined, path: string) => {
+  if (pattern === undefined) return true
+
+  try {
+    return new RegExp(pattern).test(path)
+  } catch {
+    return true
+  }
+}
+
+const routeFor = (
+  ingress: z.infer<typeof ingressRuleSchema>[],
+  hostname: string,
+  path: string,
+) =>
+  ingress.find(
+    (rule) =>
+      ingressHostnameMatches(rule.hostname, hostname) &&
+      ingressPathMatches(rule.path, path),
+  )
+
+const routesToOrigin = (rule: z.infer<typeof ingressRuleSchema> | undefined) =>
+  rule !== undefined && !rule.service.startsWith('http_status:')
 
 const getJson = async <Schema extends z.ZodType>(
   url: string,
@@ -217,6 +276,81 @@ export const runCloudflarePreflight = async ({
       `Cloudflare preflight failed: Access application coverage check: ${uncovered.join(
         ' and ',
       )} ${uncovered.length === 1 ? 'is' : 'are'} unprotected on ${hostname}`,
+    )
+  }
+
+  const tunnelName = `fileslop:${hostname}`
+  const tunnels = await getJson(
+    `${CLOUDFLARE_API_URL}/accounts/${resolvedAccountId}/cfd_tunnel?is_deleted=false&per_page=1000`,
+    apiToken,
+    fetcher,
+    tunnelResponseSchema,
+    'tunnel ingress check',
+  )
+
+  if (
+    tunnels.result_info?.total_count !== undefined &&
+    tunnels.result_info.total_count > tunnels.result.length
+  ) {
+    throw new Error(
+      'Cloudflare preflight failed: tunnel ingress check: the tunnel list is incomplete',
+    )
+  }
+
+  const ownedTunnels = tunnels.result.filter(
+    (tunnel) => tunnel.name === tunnelName,
+  )
+
+  if (ownedTunnels.length !== 1) {
+    throw new Error(
+      `Cloudflare preflight failed: tunnel ingress check: expected one owned tunnel for ${hostname}`,
+    )
+  }
+
+  const tunnel = ownedTunnels[0]!
+
+  if (tunnel.config_src !== undefined && tunnel.config_src !== 'cloudflare') {
+    throw new Error(
+      'Cloudflare preflight failed: tunnel ingress check: the owned tunnel is not remotely managed',
+    )
+  }
+
+  const configuration = await getJson(
+    `${CLOUDFLARE_API_URL}/accounts/${resolvedAccountId}/cfd_tunnel/${tunnel.id}/configurations`,
+    apiToken,
+    fetcher,
+    tunnelConfigurationResponseSchema,
+    'tunnel ingress check',
+  )
+  const ingress = configuration.result.config?.ingress ?? []
+  const unroutedReads = (['p', 'pt', 'r', 'rt'] as const).filter(
+    (namespace) =>
+      !routesToOrigin(routeFor(ingress, hostname, `/${namespace}/file`)),
+  )
+
+  if (unroutedReads.length > 0) {
+    throw new Error(
+      `Cloudflare preflight failed: tunnel ingress check: ${unroutedReads.join(
+        ' and ',
+      )} ${unroutedReads.length === 1 ? 'is' : 'are'} not routed on ${hostname}`,
+    )
+  }
+
+  const safeReadPaths = new Set(
+    (['p', 'pt', 'r', 'rt'] as const).map(
+      (namespace) => `^/${namespace}(/.*)?$`,
+    ),
+  )
+  const unsafeOriginRule = ingress.find(
+    (rule) =>
+      routesToOrigin(rule) &&
+      ingressHostnameMatches(rule.hostname, hostname) &&
+      (rule.path === undefined || !safeReadPaths.has(rule.path)),
+  )
+
+  if (unsafeOriginRule) {
+    throw new Error(
+      `Cloudflare preflight failed: tunnel ingress check: /w/ is routed on ${hostname}`,
     )
   }
 }

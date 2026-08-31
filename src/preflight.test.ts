@@ -10,6 +10,21 @@ const jsonResponse = (result: unknown, resultInfo?: unknown) =>
     ...(resultInfo ? { result_info: resultInfo } : {}),
   })
 
+const tunnel = {
+  id: 'tunnel-id',
+  name: 'fileslop:files.example',
+  config_src: 'cloudflare',
+}
+
+const safeIngress = [
+  ...(['p', 'pt', 'r', 'rt'] as const).map((namespace) => ({
+    hostname: 'files.example',
+    path: `^/${namespace}(/.*)?$`,
+    service: 'http://localhost:3000',
+  })),
+  { service: 'http_status:404' },
+]
+
 const createFetch = (responses: Response[]) => {
   const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = []
   const fetcher = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -37,6 +52,8 @@ describe('Cloudflare preflight', () => {
           ],
         },
       ]),
+      jsonResponse([tunnel]),
+      jsonResponse({ config: { ingress: safeIngress } }),
     ])
 
     await runCloudflarePreflight({
@@ -48,6 +65,8 @@ describe('Cloudflare preflight', () => {
     expect(requests.map(({ input }) => input.toString())).toEqual([
       'https://api.cloudflare.com/client/v4/accounts?per_page=50',
       'https://api.cloudflare.com/client/v4/accounts/account-id/access/apps?per_page=1000',
+      'https://api.cloudflare.com/client/v4/accounts/account-id/cfd_tunnel?is_deleted=false&per_page=1000',
+      'https://api.cloudflare.com/client/v4/accounts/account-id/cfd_tunnel/tunnel-id/configurations',
     ])
     expect(requests.every(({ init }) => init?.method === 'GET')).toBe(true)
     expect(
@@ -62,6 +81,8 @@ describe('Cloudflare preflight', () => {
   test('uses an explicit account without listing accounts', async () => {
     const { fetch, requests } = createFetch([
       jsonResponse([{ type: 'self_hosted', domain: 'files.example' }]),
+      jsonResponse([tunnel]),
+      jsonResponse({ config: { ingress: safeIngress } }),
     ])
 
     await runCloudflarePreflight({
@@ -71,7 +92,7 @@ describe('Cloudflare preflight', () => {
       fetch,
     })
 
-    expect(requests).toHaveLength(1)
+    expect(requests).toHaveLength(3)
     expect(requests[0]?.input.toString()).toContain(
       '/accounts/configured-account/access/apps',
     )
@@ -115,5 +136,34 @@ describe('Cloudflare preflight', () => {
     ).rejects.toThrow(
       'Access application coverage check: rt is unprotected on files.example',
     )
+  })
+
+  test('rejects ingress that routes the write prefix', async () => {
+    const { fetch } = createFetch([
+      jsonResponse([{ type: 'self_hosted', domain: 'files.example' }]),
+      jsonResponse([tunnel]),
+      jsonResponse({
+        config: {
+          ingress: [
+            ...safeIngress.slice(0, -1),
+            {
+              hostname: 'files.example',
+              path: '^/w/p(/.*)?$',
+              service: 'http://localhost:3000',
+            },
+            { service: 'http_status:404' },
+          ],
+        },
+      }),
+    ])
+
+    await expect(
+      runCloudflarePreflight({
+        accountId: 'account-id',
+        apiToken: 'token',
+        baseUrl: 'https://files.example',
+        fetch,
+      }),
+    ).rejects.toThrow('tunnel ingress check: /w/ is routed on files.example')
   })
 })

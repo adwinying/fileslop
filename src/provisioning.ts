@@ -3,6 +3,8 @@ import { z } from 'zod'
 
 const CLOUDFLARE_API_URL = 'https://api.cloudflare.com/client/v4'
 const namespaces = ['r', 'rt'] as const
+const readNamespaces = ['p', 'pt', 'r', 'rt'] as const
+const originService = 'http://localhost:3000'
 
 const apiErrorSchema = z.object({ message: z.string() })
 const resultInfoSchema = z
@@ -34,6 +36,35 @@ const identityProviderSummarySchema = z.object({
 const identityProviderSchema = identityProviderSummarySchema.extend({
   config: z.record(z.string(), z.unknown()),
 })
+const tunnelSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  config_src: z.string().optional(),
+})
+const ingressRuleSchema = z.object({
+  hostname: z.string().optional(),
+  path: z.string().optional(),
+  service: z.string(),
+  originRequest: z.record(z.string(), z.unknown()).optional(),
+})
+const tunnelConfigurationSchema = z.object({
+  config: z
+    .object({
+      ingress: z.array(ingressRuleSchema).optional(),
+      originRequest: z.record(z.string(), z.unknown()).optional(),
+    })
+    .optional(),
+})
+const zoneSchema = z.object({ id: z.string(), name: z.string() })
+const dnsRecordSchema = z.object({
+  id: z.string(),
+  type: z.string(),
+  name: z.string(),
+  content: z.string(),
+  proxied: z.boolean().optional(),
+  ttl: z.number().optional(),
+  comment: z.string().optional(),
+})
 
 const responseSchema = <Result extends z.ZodType>(result: Result) =>
   z.object({
@@ -54,6 +85,15 @@ const identityProviderListSchema = responseSchema(
   z.array(identityProviderSummarySchema),
 )
 const identityProviderSchemaResponse = responseSchema(identityProviderSchema)
+const tunnelListSchema = responseSchema(z.array(tunnelSchema))
+const tunnelSchemaResponse = responseSchema(tunnelSchema)
+const tunnelTokenSchema = responseSchema(z.string().min(1))
+const tunnelConfigurationSchemaResponse = responseSchema(
+  tunnelConfigurationSchema,
+)
+const zoneListSchema = responseSchema(z.array(zoneSchema))
+const dnsRecordListSchema = responseSchema(z.array(dnsRecordSchema))
+const dnsRecordSchemaResponse = responseSchema(dnsRecordSchema)
 
 type IdentityProvider = {
   name: string
@@ -100,6 +140,8 @@ const ownedPolicyName = (hostname: string, namespace: 'r' | 'rt') =>
 
 const ownedIdentityProviderName = (hostname: string, name: string) =>
   `fileslop:${hostname}:idp:${name}`
+
+const ownedTunnelName = (hostname: string) => `fileslop:${hostname}`
 
 const parseCloudflareErrors = (body: unknown) => {
   const result = z.object({ errors: z.array(apiErrorSchema) }).safeParse(body)
@@ -189,6 +231,255 @@ const canonicalJson = (value: unknown): string => {
   }
 
   return JSON.stringify(value) ?? 'undefined'
+}
+
+const desiredReadIngress = (hostname: string) =>
+  readNamespaces.map((namespace) => ({
+    hostname,
+    path: `^/${namespace}(/.*)?$`,
+    service: originService,
+  }))
+
+const reconcileIngress = (
+  current: z.infer<typeof ingressRuleSchema>[],
+  hostname: string,
+) => {
+  const readRules = desiredReadIngress(hostname)
+  const next = [...current]
+  const terminalIndex = next.findIndex(
+    (rule) => rule.hostname === undefined && rule.path === undefined,
+  )
+  let insertionIndex = terminalIndex === -1 ? next.length : terminalIndex
+
+  for (const rule of readRules) {
+    const ownedIndex = next.findIndex(
+      (candidate) =>
+        candidate.hostname === rule.hostname && candidate.path === rule.path,
+    )
+
+    if (ownedIndex === -1) {
+      next.splice(insertionIndex, 0, rule)
+      insertionIndex += 1
+    } else if (canonicalJson(next[ownedIndex]) !== canonicalJson(rule)) {
+      next[ownedIndex] = rule
+    }
+  }
+
+  if (terminalIndex === -1) next.push({ service: 'http_status:404' })
+
+  return next
+}
+
+const reconcileTunnel = async ({
+  accountId,
+  apiToken,
+  fetch: fetcher,
+  hostname,
+}: {
+  accountId: string
+  apiToken: string
+  fetch: Fetch
+  hostname: string
+}) => {
+  const tunnelsPath = `/accounts/${accountId}/cfd_tunnel`
+  const tunnels = await cloudflareRequest({
+    apiToken,
+    fetch: fetcher,
+    method: 'GET',
+    path: `${tunnelsPath}?is_deleted=false&per_page=1000`,
+    schema: tunnelListSchema,
+    task: 'tunnel lookup',
+  })
+  assertCompleteList(
+    tunnels.result.length,
+    tunnels.result_info?.total_count,
+    'tunnel lookup',
+  )
+
+  const name = ownedTunnelName(hostname)
+  const ownedTunnels = tunnels.result.filter((tunnel) => tunnel.name === name)
+
+  if (ownedTunnels.length > 1) {
+    throw new Error(
+      'Cloudflare provisioning failed: tunnel lookup: more than one owned tunnel exists',
+    )
+  }
+
+  const current = ownedTunnels[0]
+  const tunnel =
+    current ??
+    (
+      await cloudflareRequest({
+        apiToken,
+        body: { name, config_src: 'cloudflare' },
+        fetch: fetcher,
+        method: 'POST',
+        path: tunnelsPath,
+        schema: tunnelSchemaResponse,
+        task: 'tunnel creation',
+      })
+    ).result
+
+  if (tunnel.config_src !== undefined && tunnel.config_src !== 'cloudflare') {
+    throw new Error(
+      'Cloudflare provisioning failed: tunnel lookup: the owned tunnel is not remotely managed',
+    )
+  }
+
+  const configurationPath = `${tunnelsPath}/${tunnel.id}/configurations`
+  const configuration = await cloudflareRequest({
+    apiToken,
+    fetch: fetcher,
+    method: 'GET',
+    path: configurationPath,
+    schema: tunnelConfigurationSchemaResponse,
+    task: 'tunnel ingress lookup',
+  })
+  const currentConfig = configuration.result.config ?? {}
+  const currentIngress = currentConfig.ingress ?? []
+  const ingress = reconcileIngress(currentIngress, hostname)
+
+  if (canonicalJson(ingress) !== canonicalJson(currentIngress)) {
+    await cloudflareRequest({
+      apiToken,
+      body: {
+        config: {
+          ...currentConfig,
+          ingress,
+        },
+      },
+      fetch: fetcher,
+      method: 'PUT',
+      path: configurationPath,
+      schema: tunnelConfigurationSchemaResponse,
+      task: 'tunnel ingress update',
+    })
+  }
+
+  const token = await cloudflareRequest({
+    apiToken,
+    fetch: fetcher,
+    method: 'GET',
+    path: `${tunnelsPath}/${tunnel.id}/token`,
+    schema: tunnelTokenSchema,
+    task: 'tunnel token lookup',
+  })
+
+  return { id: tunnel.id, token: token.result }
+}
+
+const reconcileDnsRecord = async ({
+  accountId,
+  apiToken,
+  fetch: fetcher,
+  hostname,
+  tunnelId,
+}: {
+  accountId: string
+  apiToken: string
+  fetch: Fetch
+  hostname: string
+  tunnelId: string
+}) => {
+  const zones = await cloudflareRequest({
+    apiToken,
+    fetch: fetcher,
+    method: 'GET',
+    path: `/zones?account.id=${encodeURIComponent(accountId)}&per_page=50`,
+    schema: zoneListSchema,
+    task: 'DNS zone lookup',
+  })
+  assertCompleteList(
+    zones.result.length,
+    zones.result_info?.total_count,
+    'DNS zone lookup',
+  )
+
+  const matchingZones = zones.result
+    .filter(
+      (zone) => hostname === zone.name || hostname.endsWith(`.${zone.name}`),
+    )
+    .sort((left, right) => right.name.length - left.name.length)
+  const zone = matchingZones[0]
+
+  if (!zone) {
+    throw new Error(
+      `Cloudflare provisioning failed: DNS zone lookup: no zone contains ${hostname}`,
+    )
+  }
+
+  const equallySpecificZones = matchingZones.filter(
+    (candidate) => candidate.name.length === zone.name.length,
+  )
+
+  if (equallySpecificZones.length > 1) {
+    throw new Error(
+      `Cloudflare provisioning failed: DNS zone lookup: more than one zone contains ${hostname}`,
+    )
+  }
+
+  const recordsPath = `/zones/${zone.id}/dns_records`
+  const records = await cloudflareRequest({
+    apiToken,
+    fetch: fetcher,
+    method: 'GET',
+    path: `${recordsPath}?type=CNAME&name=${encodeURIComponent(hostname)}&per_page=1000`,
+    schema: dnsRecordListSchema,
+    task: 'tunnel DNS record lookup',
+  })
+  assertCompleteList(
+    records.result.length,
+    records.result_info?.total_count,
+    'tunnel DNS record lookup',
+  )
+
+  const comment = ownedTunnelName(hostname)
+  const ownedRecords = records.result.filter(
+    (record) => record.name === hostname && record.comment === comment,
+  )
+
+  if (ownedRecords.length > 1) {
+    throw new Error(
+      'Cloudflare provisioning failed: tunnel DNS record lookup: more than one owned record exists',
+    )
+  }
+
+  const desired = {
+    type: 'CNAME',
+    name: hostname,
+    content: `${tunnelId}.cfargotunnel.com`,
+    proxied: true,
+    ttl: 1,
+    comment,
+  }
+  const current = ownedRecords[0]
+
+  if (!current) {
+    await cloudflareRequest({
+      apiToken,
+      body: desired,
+      fetch: fetcher,
+      method: 'POST',
+      path: recordsPath,
+      schema: dnsRecordSchemaResponse,
+      task: 'tunnel DNS record creation',
+    })
+  } else if (
+    current.type !== desired.type ||
+    current.content !== desired.content ||
+    current.proxied !== desired.proxied ||
+    current.ttl !== desired.ttl
+  ) {
+    await cloudflareRequest({
+      apiToken,
+      body: desired,
+      fetch: fetcher,
+      method: 'PUT',
+      path: `${recordsPath}/${current.id}`,
+      schema: dnsRecordSchemaResponse,
+      task: 'tunnel DNS record update',
+    })
+  }
 }
 
 const reconcileIdentityProviders = async ({
@@ -521,4 +812,20 @@ export const runCloudflareProvisioning = async ({
     hostname,
     identityProviders,
   })
+
+  const tunnel = await reconcileTunnel({
+    accountId: resolvedAccountId,
+    apiToken,
+    fetch: fetcher,
+    hostname,
+  })
+  await reconcileDnsRecord({
+    accountId: resolvedAccountId,
+    apiToken,
+    fetch: fetcher,
+    hostname,
+    tunnelId: tunnel.id,
+  })
+
+  return { tunnelToken: tunnel.token }
 }

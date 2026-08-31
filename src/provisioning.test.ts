@@ -38,6 +38,31 @@ const identityProvider = (
   config,
 })
 
+const tunnel = {
+  id: 'tunnel-id',
+  name: `fileslop:${hostname}`,
+  config_src: 'cloudflare',
+}
+
+const ingress = [
+  ...(['p', 'pt', 'r', 'rt'] as const).map((namespace) => ({
+    hostname,
+    path: `^/${namespace}(/.*)?$`,
+    service: 'http://localhost:3000',
+  })),
+  { service: 'http_status:404' },
+]
+
+const dnsRecord = {
+  id: 'dns-record-id',
+  type: 'CNAME',
+  name: hostname,
+  content: `${tunnel.id}.cfargotunnel.com`,
+  proxied: true,
+  ttl: 1,
+  comment: `fileslop:${hostname}`,
+}
+
 const jsonResponse = (result: unknown, totalCount?: number) =>
   Response.json({
     success: true,
@@ -49,10 +74,73 @@ const jsonResponse = (result: unknown, totalCount?: number) =>
       : { result_info: { total_count: totalCount } }),
   })
 
-const createFetch = (responses: Response[]) => {
+const createInfrastructure = (exists = true, initialIngress = ingress) => {
+  let currentTunnel = exists ? tunnel : undefined
+  let currentIngress: typeof ingress | undefined = exists
+    ? initialIngress
+    : undefined
+  let currentRecord = exists ? dnsRecord : undefined
+
+  return (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input.toString()
+    const method = init?.method
+
+    if (url.endsWith('/cfd_tunnel?is_deleted=false&per_page=1000')) {
+      return jsonResponse(currentTunnel ? [currentTunnel] : [])
+    }
+
+    if (url.endsWith('/cfd_tunnel') && method === 'POST') {
+      currentTunnel = tunnel
+      return jsonResponse(tunnel)
+    }
+
+    if (url.endsWith('/cfd_tunnel/tunnel-id/configurations')) {
+      if (method === 'PUT') {
+        currentIngress = (
+          JSON.parse(String(init?.body)) as {
+            config: { ingress: typeof ingress }
+          }
+        ).config.ingress
+      }
+
+      return jsonResponse(
+        currentIngress === undefined
+          ? {}
+          : { config: { ingress: currentIngress } },
+      )
+    }
+
+    if (url.endsWith('/cfd_tunnel/tunnel-id/token')) {
+      return jsonResponse('tunnel-token')
+    }
+
+    if (url.includes('/zones?')) {
+      return jsonResponse([{ id: 'zone-id', name: 'example' }])
+    }
+
+    if (url.includes('/zones/zone-id/dns_records?')) {
+      return jsonResponse(currentRecord ? [currentRecord] : [])
+    }
+
+    if (url.endsWith('/zones/zone-id/dns_records') && method === 'POST') {
+      currentRecord = {
+        ...dnsRecord,
+        ...(JSON.parse(String(init?.body)) as Omit<typeof dnsRecord, 'id'>),
+      }
+      return jsonResponse(currentRecord)
+    }
+  }
+}
+
+const createFetch = (
+  responses: Response[],
+  infrastructure = createInfrastructure(),
+) => {
   const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = []
   const fetcher = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
     requests.push({ input, init })
+    const infrastructureResponse = infrastructure(input, init)
+    if (infrastructureResponse) return infrastructureResponse
     const response = responses.shift()
     if (!response) throw new Error('Unexpected request')
     return response
@@ -145,6 +233,93 @@ describe('Cloudflare Access provisioning', () => {
     })
   })
 
+  test('creates one remote tunnel, safe ingress, and its DNS record', async () => {
+    const { fetch, requests } = createFetch(
+      [
+        jsonResponse([]),
+        jsonResponse(application('r')),
+        jsonResponse([]),
+        jsonResponse(policy('r')),
+        jsonResponse(application('rt')),
+        jsonResponse([]),
+        jsonResponse(policy('rt')),
+        jsonResponse([]),
+        jsonResponse(identityProvider()),
+        jsonResponse([application('r'), application('rt')]),
+        jsonResponse([policy('r')]),
+        jsonResponse([policy('rt')]),
+        jsonResponse([identityProvider()]),
+        jsonResponse(identityProvider()),
+      ],
+      createInfrastructure(false),
+    )
+
+    const result = await provision(fetch)
+    const secondResult = await provision(fetch)
+    const tunnelCreate = requests.find(
+      ({ input, init }) =>
+        input.toString().endsWith('/cfd_tunnel') && init?.method === 'POST',
+    )
+    const ingressUpdate = requests.find(
+      ({ input, init }) =>
+        input.toString().endsWith('/configurations') && init?.method === 'PUT',
+    )
+    const dnsCreate = requests.find(
+      ({ input, init }) =>
+        input.toString().endsWith('/dns_records') && init?.method === 'POST',
+    )
+
+    expect(result).toEqual({ tunnelToken: 'tunnel-token' })
+    expect(secondResult).toEqual({ tunnelToken: 'tunnel-token' })
+    expect(requestBody(tunnelCreate!)).toEqual({
+      name: `fileslop:${hostname}`,
+      config_src: 'cloudflare',
+    })
+    expect(requestBody(ingressUpdate!)).toEqual({ config: { ingress } })
+    expect(requestBody(dnsCreate!)).toEqual({
+      type: 'CNAME',
+      name: hostname,
+      content: 'tunnel-id.cfargotunnel.com',
+      proxied: true,
+      ttl: 1,
+      comment: `fileslop:${hostname}`,
+    })
+
+    const emittedIngress = (
+      requestBody(ingressUpdate!).config as { ingress: typeof ingress }
+    ).ingress
+    const originRules = emittedIngress.filter(
+      (rule) => !rule.service.startsWith('http_status:'),
+    )
+    const writePaths = [
+      '/w/',
+      ...(['p', 'pt', 'r', 'rt'] as const).flatMap((namespace) => [
+        `/w/${namespace}`,
+        `/w/${namespace}/file`,
+      ]),
+    ]
+    expect(
+      originRules.some((rule) =>
+        writePaths.some(
+          (path) => !('path' in rule) || new RegExp(rule.path).test(path),
+        ),
+      ),
+    ).toBe(false)
+    expect(requests.some(({ init }) => init?.method === 'DELETE')).toBe(false)
+    expect(
+      requests.filter(
+        ({ input, init }) =>
+          input.toString().endsWith('/cfd_tunnel') && init?.method === 'POST',
+      ),
+    ).toHaveLength(1)
+    expect(
+      requests.filter(
+        ({ input, init }) =>
+          input.toString().endsWith('/dns_records') && init?.method === 'POST',
+      ),
+    ).toHaveLength(1)
+  })
+
   test('does not create a second set when provisioning runs again', async () => {
     const currentApplications = [application('r'), application('rt')]
     const { fetch, requests } = createFetch([
@@ -176,6 +351,40 @@ describe('Cloudflare Access provisioning', () => {
     expect(requests.filter(({ init }) => init?.method === 'POST')).toHaveLength(
       5,
     )
+  })
+
+  test('adds read ingress without deleting an existing rule', async () => {
+    const operatorRule = {
+      hostname: 'operator.example',
+      path: '^/status$',
+      service: 'http://localhost:4000',
+    }
+    const { fetch, requests } = createFetch(
+      [
+        jsonResponse([application('r'), application('rt')]),
+        jsonResponse([policy('r')]),
+        jsonResponse([policy('rt')]),
+        jsonResponse([identityProvider()]),
+        jsonResponse(identityProvider()),
+      ],
+      createInfrastructure(true, [
+        operatorRule,
+        { service: 'http_status:404' },
+      ]),
+    )
+
+    await provision(fetch)
+
+    const update = requests.find(
+      ({ input, init }) =>
+        input.toString().endsWith('/configurations') && init?.method === 'PUT',
+    )
+    const updatedIngress = (
+      requestBody(update!).config as { ingress: unknown[] }
+    ).ingress
+
+    expect(updatedIngress).toContainEqual(operatorRule)
+    expect(requests.some(({ init }) => init?.method === 'DELETE')).toBe(false)
   })
 
   test('reverts owned policy drift without targeting unrelated resources', async () => {
