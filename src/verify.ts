@@ -21,10 +21,15 @@ type InternalVerifyOptions = VerifyOptions & {
   originUrl: string
 }
 
+type RoundTripVerifyOptions = VerifyOptions & {
+  originUrl: string
+}
+
 export class VerificationError extends Error {}
 
 const namespaces = ['p', 'pt', 'r', 'rt'] as const
 const probeFilename = 'verify00.txt'
+const roundTripContents = new TextEncoder().encode('fileslop round trip\n')
 
 const urlFor = (baseUrl: string, path: string) => new URL(path, baseUrl)
 
@@ -164,6 +169,66 @@ export const verifyInternal = async ({
 
     logger.log(`PASS POST /w/${result.namespace} reaches the write handler`)
   }
+
+  return 'passed' as const
+}
+
+export const verifyRoundTrip = async ({
+  originUrl,
+  fetcher = fetch,
+  logger = console,
+  timeoutMs = 5_000,
+}: RoundTripVerifyOptions) => {
+  const form = new FormData()
+  form.set('file', new File([roundTripContents], 'fileslop-verify.txt'))
+
+  const [uploadResponse, uploadError] = await tryTo(
+    request(fetcher, urlFor(originUrl, '/w/p'), timeoutMs, {
+      method: 'POST',
+      body: form,
+    }),
+  )
+
+  if (uploadError !== null) {
+    throw new VerificationError(
+      `POST /w/p failed: ${describeError(uploadError)}`,
+    )
+  }
+
+  if (uploadResponse.status !== 201) {
+    throw new VerificationError(
+      `POST /w/p returned unexpected status (${uploadResponse.status})`,
+    )
+  }
+
+  const uploadedUrl = (await uploadResponse.text()).trim()
+  const [downloadResponse, downloadError] = await tryTo(
+    request(fetcher, urlFor(uploadedUrl, ''), timeoutMs),
+  )
+
+  if (downloadError !== null) {
+    throw new VerificationError(
+      `GET uploaded file failed: ${describeError(downloadError)}`,
+    )
+  }
+
+  if (downloadResponse.status !== 200) {
+    throw new VerificationError(
+      `GET uploaded file returned unexpected status (${downloadResponse.status})`,
+    )
+  }
+
+  const downloadedContents = new Uint8Array(
+    await downloadResponse.arrayBuffer(),
+  )
+  if (
+    downloadedContents.length !== roundTripContents.length ||
+    downloadedContents.some((byte, index) => byte !== roundTripContents[index])
+  ) {
+    throw new VerificationError('GET uploaded file returned different bytes')
+  }
+
+  logger.log('PASS uploaded file survives a round trip')
 
   return 'passed' as const
 }

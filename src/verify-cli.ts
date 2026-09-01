@@ -1,9 +1,15 @@
 import { tryTo } from '~/utils'
-import { VerificationError, verifyExternal, verifyInternal } from '~/verify'
+import {
+  VerificationError,
+  verifyExternal,
+  verifyInternal,
+  verifyRoundTrip,
+} from '~/verify'
 
 const usage = `Usage:
   bun run verify:external <deployed-url>
-  bun run verify:internal <origin-url>`
+  bun run verify:internal <origin-url>
+  bun run verify:round-trip <origin-url>`
 const logger = {
   log: console.log,
   warn: (message: string) =>
@@ -25,6 +31,11 @@ const main = async () => {
 
   if (mode === 'internal' && args.length === 1) {
     await verifyInternal({ originUrl: args[0], logger })
+    return
+  }
+
+  if (mode === 'round-trip' && args.length === 1) {
+    await verifyRoundTrip({ originUrl: args[0], logger })
     return
   }
 

@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { VerificationError, verifyExternal, verifyInternal } from '~/verify'
+import {
+  VerificationError,
+  verifyExternal,
+  verifyInternal,
+  verifyRoundTrip,
+} from '~/verify'
 
 const accessChallenge = () =>
   new Response(null, {
@@ -138,5 +143,98 @@ describe('internal verification', () => {
         fetcher,
       }),
     ).rejects.toBeInstanceOf(VerificationError)
+  })
+})
+
+describe('round-trip verification', () => {
+  test('uploads and fetches back matching bytes', async () => {
+    const requestedPaths: string[] = []
+    let uploadedContents: ArrayBuffer | undefined
+    const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input.toString())
+      requestedPaths.push(url.pathname)
+
+      if (url.pathname === '/w/p') {
+        const form = init?.body as FormData
+        const file = form.get('file') as File
+        uploadedContents = await file.arrayBuffer()
+        return new Response('http://origin.example:3000/p/abc1234.bin\n', {
+          status: 201,
+        })
+      }
+
+      return new Response(uploadedContents, { status: 200 })
+    }
+
+    await expect(
+      verifyRoundTrip({
+        originUrl: 'http://origin.example:3000',
+        fetcher,
+      }),
+    ).resolves.toBe('passed')
+    expect(requestedPaths).toEqual(['/w/p', '/p/abc1234.bin'])
+  })
+
+  test('fails when the upload fails', async () => {
+    const fetcher = async () =>
+      new Response('Storage failure\n', { status: 500 })
+
+    await expect(
+      verifyRoundTrip({
+        originUrl: 'http://origin.example:3000',
+        fetcher,
+      }),
+    ).rejects.toThrow('POST /w/p returned unexpected status (500)')
+  })
+
+  test('fails when the uploaded file is not found', async () => {
+    let calls = 0
+    const fetcher = async () => {
+      calls += 1
+      return calls === 1
+        ? new Response('http://origin.example:3000/p/abc1234.bin\n', {
+            status: 201,
+          })
+        : new Response('Not Found\n', { status: 404 })
+    }
+
+    await expect(
+      verifyRoundTrip({
+        originUrl: 'http://origin.example:3000',
+        fetcher,
+      }),
+    ).rejects.toThrow('GET uploaded file returned unexpected status (404)')
+  })
+
+  test('fails when the downloaded bytes do not match', async () => {
+    let calls = 0
+    const fetcher = async () => {
+      calls += 1
+      return calls === 1
+        ? new Response('http://origin.example:3000/p/abc1234.bin\n', {
+            status: 201,
+          })
+        : new Response('different', { status: 200 })
+    }
+
+    await expect(
+      verifyRoundTrip({
+        originUrl: 'http://origin.example:3000',
+        fetcher,
+      }),
+    ).rejects.toThrow('GET uploaded file returned different bytes')
+  })
+
+  test('fails when the origin is unreachable', async () => {
+    const fetcher = async () => {
+      throw new TypeError('Unable to connect')
+    }
+
+    await expect(
+      verifyRoundTrip({
+        originUrl: 'http://origin.example:3000',
+        fetcher,
+      }),
+    ).rejects.toThrow('POST /w/p failed: Unable to connect')
   })
 })
