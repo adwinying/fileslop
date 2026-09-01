@@ -4,14 +4,24 @@ A self-hosted file drop for agents, built with Bun and Elysia.
 
 ## Container deployment
 
-Build the image from the repository root:
+Pull the current image from GHCR:
 
 ```bash
-docker build --tag fileslop .
+docker pull ghcr.io/adwinying/fileslop:latest
 ```
 
-The image pins cloudflared to the same version as `mise.toml`. Override that
-pin when testing an upgrade:
+Every push to `main` publishes two multi-architecture tags:
+
+- `latest` points to the most recent build.
+- `sha-<short>` identifies one commit and does not move, for example
+  `sha-a1b2c3d`.
+
+GHCR creates the package as private on its first publish. Before anyone else can
+pull it without authentication, open the package settings on GitHub, choose
+**Change visibility**, and make the package public. This is a one-time change.
+
+The image pins cloudflared to the same version as `mise.toml`. To build locally
+or test a cloudflared upgrade:
 
 ```bash
 docker build --build-arg CLOUDFLARED_VERSION=2026.8.3 --tag fileslop .
@@ -27,7 +37,7 @@ docker run --rm \
   --publish 127.0.0.1:3000:3000 \
   --env BASE_URL=http://localhost:3000 \
   --mount type=bind,source="$PWD/storage",target=/storage \
-  fileslop
+  ghcr.io/adwinying/fileslop:latest
 ```
 
 The bind mount keeps uploaded files when the container is replaced. A mounted
@@ -42,7 +52,7 @@ docker run --rm \
   --user "$(id -u):$(id -g)" \
   --env BASE_URL=http://localhost:3000 \
   --mount type=bind,source="$PWD/storage",target=/storage \
-  fileslop
+  ghcr.io/adwinying/fileslop:latest
 ```
 
 Pass the Cloudflare variables described below to run provisioning and the
