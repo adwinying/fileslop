@@ -8,12 +8,16 @@ fileslop can provision its own Cloudflare Tunnel, DNS record, Access
 applications, policies, and identity providers. Two steps remain manual:
 
 1. Add the domain to Cloudflare and point its nameservers at Cloudflare.
-2. Create a Cloudflare API token with these permissions:
+2. Create a [Cloudflare API token](https://dash.cloudflare.com/profile/api-tokens)
+   with these permissions:
    - Account | Cloudflare Tunnel | Edit
+   - Account | Access: Apps and Policies | Edit
+   - Account | Access: Organizations, Identity Providers, and Groups | Edit
    - Zone | DNS | Edit
-   - Access | Apps and Identity Providers Write
+   - Zone | Zone | Read
 
-Scope the token to the account and zone used by fileslop.
+Scope the token to the single account and zone used by fileslop. Set
+`CLOUDFLARE_ACCOUNT_ID` when the token can access more than one account.
 
 The process keeps this write-scoped token for its lifetime. If fileslop is
 compromised, the attacker can also change the Access applications protecting
@@ -34,7 +38,8 @@ On first boot, fileslop:
 
 1. Creates or updates the `r` and `rt` Access applications and their allow
    policies.
-2. Creates One-time PIN plus any identity providers from `ACCESS_IDPS`.
+2. Reuses the account's One-time PIN or creates one, then adds the identity
+   providers from `ACCESS_IDPS`.
 3. Creates or updates a remotely managed tunnel, its read-only ingress, and a
    proxied DNS record for the `BASE_URL` hostname.
 4. Runs preflight, starts the HTTP server, then starts `cloudflared` with the
@@ -63,7 +68,7 @@ origin directly, bypassing the tunnel. Run the
 | `ACCESS_EMAILS`           | In Cloudflare mode, unless `ACCESS_EMAIL_DOMAINS` is set | None            | Comma-separated email allowlist for `r` and `rt`.                                |
 | `ACCESS_EMAIL_DOMAINS`    | In Cloudflare mode, unless `ACCESS_EMAILS` is set        | None            | Comma-separated domain allowlist. A leading `@` is optional.                     |
 | `ACCESS_SESSION_DURATION` | No                                                       | `24h`           | Cloudflare Access session duration.                                              |
-| `ACCESS_IDPS`             | No                                                       | `[]`            | JSON array of extra Cloudflare identity providers. One-time PIN is always added. |
+| `ACCESS_IDPS`             | No                                                       | `[]`            | JSON array of extra Cloudflare identity providers.                               |
 
 At least one of `ACCESS_EMAILS` or `ACCESS_EMAIL_DOMAINS` is required when
 `CLOUDFLARE_API_TOKEN` is set. fileslop also refuses to provision when it cannot

@@ -49,12 +49,13 @@ const ingressRuleSchema = z.looseObject({
   originRequest: z.record(z.string(), z.unknown()).optional(),
 })
 const tunnelConfigurationSchema = z.object({
+  // New tunnels return `config: null`.
   config: z
     .looseObject({
       ingress: z.array(ingressRuleSchema).optional(),
       originRequest: z.record(z.string(), z.unknown()).optional(),
     })
-    .optional(),
+    .nullish(),
 })
 const zoneSchema = z.object({ id: z.string(), name: z.string() })
 const dnsRecordSchema = z.object({
@@ -516,10 +517,16 @@ const reconcileIdentityProviders = async ({
     'identity provider lookup',
   )
 
-  const desiredProviders = [
-    { name: 'One-time PIN', type: 'onetimepin', config: {} },
-    ...identityProviders,
-  ]
+  // Cloudflare allows only one One-time PIN provider per account.
+  const hasOneTimePin = response.result.some(
+    ({ type }) => type === 'onetimepin',
+  )
+  const desiredProviders = hasOneTimePin
+    ? identityProviders
+    : [
+        { name: 'One-time PIN', type: 'onetimepin', config: {} },
+        ...identityProviders,
+      ]
 
   for (const provider of desiredProviders) {
     const name = ownedIdentityProviderName(hostname, provider.name)
