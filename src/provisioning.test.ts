@@ -105,7 +105,7 @@ const createInfrastructure = (exists = true, initialIngress = ingress) => {
 
       return jsonResponse(
         currentIngress === undefined
-          ? {}
+          ? { config: null }
           : { config: { ingress: currentIngress } },
       )
     }
@@ -594,7 +594,6 @@ describe('Cloudflare Access provisioning', () => {
           type: 'github',
         },
       ]),
-      jsonResponse(identityProvider()),
       jsonResponse(
         identityProvider('Company SSO', 'oidc', { client_id: 'dashboard' }),
       ),
@@ -625,6 +624,31 @@ describe('Cloudflare Access provisioning', () => {
     ).not.toContain('unowned-idp')
   })
 
+  test("uses the account's One-time PIN without creating another", async () => {
+    const { fetch, requests } = createFetch([
+      jsonResponse([application('r'), application('rt')]),
+      jsonResponse([policy('r')]),
+      jsonResponse([policy('rt')]),
+      jsonResponse([
+        {
+          id: 'account-otp',
+          name: 'One-time PIN',
+          type: 'onetimepin',
+          config: {},
+        },
+      ]),
+    ])
+
+    await provision(fetch)
+
+    const providerRequests = requests.filter(({ input }) =>
+      input.toString().includes('/access/identity_providers'),
+    )
+
+    expect(providerRequests).toHaveLength(1)
+    expect(providerRequests[0]?.init?.method).toBe('GET')
+  })
+
   test('surfaces a rejected provider config verbatim', async () => {
     const cloudflareError = 'client_secret is invalid for this provider'
     const { fetch } = createFetch([
@@ -632,7 +656,6 @@ describe('Cloudflare Access provisioning', () => {
       jsonResponse([policy('r')]),
       jsonResponse([policy('rt')]),
       jsonResponse([identityProvider()]),
-      jsonResponse(identityProvider()),
       Response.json(
         {
           success: false,

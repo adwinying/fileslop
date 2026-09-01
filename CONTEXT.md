@@ -87,4 +87,4 @@ All validated with t3env + zod.
 | `ACCESS_SESSION_DURATION` | 24h | How long an Access login lasts before re-authenticating |
 | `ACCESS_IDPS` | One-time PIN | Additional identity providers, passed to Cloudflare unmodified |
 
-The hostname for the Access applications and the DNS record is derived from `BASE_URL` rather than configured separately. With a token present, at least one of `ACCESS_EMAILS` or `ACCESS_EMAIL_DOMAINS` must be set, or the policy would admit nobody.
+fileslop reuses the account's One-time PIN when present. The hostname for the Access applications and the DNS record is derived from `BASE_URL` rather than configured separately. With a token present, at least one of `ACCESS_EMAILS` or `ACCESS_EMAIL_DOMAINS` must be set, or the policy would admit nobody.

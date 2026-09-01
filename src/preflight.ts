@@ -57,9 +57,10 @@ const tunnelConfigurationResponseSchema = z.object({
   success: z.literal(true),
   errors: z.array(apiErrorSchema),
   result: z.object({
+    // New tunnels return `config: null`.
     config: z
       .object({ ingress: z.array(ingressRuleSchema).optional() })
-      .optional(),
+      .nullish(),
   }),
 })
 const policyResponseSchema = z.object({
