@@ -156,19 +156,26 @@ export const createApp = ({
       })
     }
 
+  // onRequest runs for unmatched routes; derive hooks do not.
+  const startedAtByRequest = new WeakMap<Request, number>()
+
   return new Elysia({ normalize: false })
     .headers({ 'cache-control': 'no-store' })
-    .derive(() => ({ startedAt: Date.now() }))
-    .onAfterResponse(({ request, set, responseValue, startedAt }) => {
+    .onRequest(({ request }) => {
+      if (logRequests) startedAtByRequest.set(request, Date.now())
+    })
+    .onAfterResponse(({ request, set, responseValue }) => {
       if (!logRequests) return
 
+      const finishedAt = Date.now()
+      const startedAt = startedAtByRequest.get(request) ?? finishedAt
       // Handlers return raw Responses, so `set.status` never sees their status.
       const status =
         responseValue instanceof Response ? responseValue.status : set.status
       const { pathname } = new URL(request.url)
 
       console.log(
-        `${new Date(startedAt).toISOString()} ${request.method} ${pathname} ${status} ${Date.now() - startedAt}ms`,
+        `${new Date(startedAt).toISOString()} ${request.method} ${pathname} ${status} ${finishedAt - startedAt}ms`,
       )
     })
     .use(
@@ -178,14 +185,19 @@ export const createApp = ({
         run: sweep,
       }),
     )
-    .onError(({ code, error }) => {
-      if (code === 'NOT_FOUND') return notFound()
+    .onError(({ code, error, set }) => {
+      // Elysia omits error responses from responseValue.
+      if (code === 'NOT_FOUND') {
+        set.status = 404
+        return notFound()
+      }
 
       if (
         code === 'VALIDATION' &&
         error.type === 'body' &&
         isOversizedUpload(error.value, maxUploadBytes)
       ) {
+        set.status = 413
         return new Response('Payload Too Large\n', { status: 413 })
       }
     })

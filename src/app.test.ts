@@ -1018,6 +1018,42 @@ describe('sweeper', () => {
   })
 })
 
+describe('request logging', () => {
+  const handleLoggedRequest = async (path: string, init?: RequestInit) => {
+    const app = createApp({
+      storageRoot: await createStorageRoot(),
+      logRequests: true,
+    })
+    const log = spyOn(console, 'log').mockImplementation(() => undefined)
+
+    try {
+      const response = await app.handle(
+        new Request(`https://files.example${path}`, init),
+      )
+
+      await Bun.sleep(0)
+
+      return { line: String(log.mock.calls[0]?.[0]), status: response.status }
+    } finally {
+      log.mockRestore()
+    }
+  }
+
+  test('logs a matched route with its status', async () => {
+    const { line, status } = await handleLoggedRequest('/p/missing.txt')
+
+    expect(status).toBe(404)
+    expect(line).toContain('GET /p/missing.txt 404')
+  })
+
+  test('logs an unmatched route instead of throwing', async () => {
+    const { line, status } = await handleLoggedRequest('/wp-login.php')
+
+    expect(status).toBe(404)
+    expect(line).toContain('GET /wp-login.php 404')
+  })
+})
+
 describe('configuration', () => {
   test('fails at import time when BASE_URL is missing', async () => {
     // --env-file=/dev/null stops Bun from loading the repo's .env into the
