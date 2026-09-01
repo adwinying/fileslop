@@ -2,6 +2,53 @@
 
 A self-hosted file drop for agents, built with Bun and Elysia.
 
+## Container deployment
+
+Build the image from the repository root:
+
+```bash
+docker build --tag fileslop .
+```
+
+The image pins cloudflared to the same version as `mise.toml`. Override that
+pin when testing an upgrade:
+
+```bash
+docker build --build-arg CLOUDFLARED_VERSION=2026.8.3 --tag fileslop .
+```
+
+Create a storage directory, make it writable by the image's uid and gid 10001,
+then bind-mount it at `/storage`:
+
+```bash
+mkdir -p storage
+sudo chown 10001:10001 storage
+docker run --rm \
+  --publish 127.0.0.1:3000:3000 \
+  --env BASE_URL=http://localhost:3000 \
+  --mount type=bind,source="$PWD/storage",target=/storage \
+  fileslop
+```
+
+The bind mount keeps uploaded files when the container is replaced. A mounted
+directory that uid 10001 cannot write makes startup fail when fileslop creates
+its namespace directories.
+
+The image runs as uid and gid 10001. Use Docker's `--user` option when the host
+directory belongs to another account:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env BASE_URL=http://localhost:3000 \
+  --mount type=bind,source="$PWD/storage",target=/storage \
+  fileslop
+```
+
+Pass the Cloudflare variables described below to run provisioning and the
+managed tunnel. Do not publish the container port in that mode. The write paths
+must only be reachable through the tailnet, as required by ADR-0001.
+
 ## Cloudflare setup
 
 fileslop can provision its own Cloudflare Tunnel, DNS record, Access
