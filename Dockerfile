@@ -30,7 +30,8 @@ RUN apt-get update \
     && groupadd --gid 10001 fileslop \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin fileslop \
     && mkdir /storage \
-    && chown fileslop:fileslop /storage
+    && chown fileslop:fileslop /storage \
+    && chmod 1777 /storage
 
 COPY --from=builder /fileslop /usr/local/bin/fileslop
 COPY --from=cloudflared /usr/local/bin/cloudflared /usr/local/bin/cloudflared

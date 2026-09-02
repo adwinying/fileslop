@@ -50,6 +50,7 @@ directory belongs to another account:
 ```bash
 docker run --rm \
   --user "$(id -u):$(id -g)" \
+  --publish 127.0.0.1:3000:3000 \
   --env BASE_URL=http://localhost:3000 \
   --mount type=bind,source="$PWD/storage",target=/storage \
   ghcr.io/adwinying/fileslop:latest
