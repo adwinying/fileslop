@@ -2,6 +2,64 @@
 
 A self-hosted file drop for agents, built with Bun and Elysia.
 
+## Container deployment
+
+Pull the current image from GHCR:
+
+```bash
+docker pull ghcr.io/adwinying/fileslop:latest
+```
+
+Every push to `main` publishes two multi-architecture tags:
+
+- `latest` points to the most recent build.
+- `sha-<short>` identifies one commit and does not move, for example
+  `sha-a1b2c3d`.
+
+GHCR creates the package as private on its first publish. Before anyone else can
+pull it without authentication, open the package settings on GitHub, choose
+**Change visibility**, and make the package public. This is a one-time change.
+
+The image pins cloudflared to the same version as `mise.toml`. To build locally
+or test a cloudflared upgrade:
+
+```bash
+docker build --build-arg CLOUDFLARED_VERSION=2026.8.3 --tag fileslop .
+```
+
+Create a storage directory, make it writable by the image's uid and gid 10001,
+then bind-mount it at `/storage`:
+
+```bash
+mkdir -p storage
+sudo chown 10001:10001 storage
+docker run --rm \
+  --publish 127.0.0.1:3000:3000 \
+  --env BASE_URL=http://localhost:3000 \
+  --mount type=bind,source="$PWD/storage",target=/storage \
+  ghcr.io/adwinying/fileslop:latest
+```
+
+The bind mount keeps uploaded files when the container is replaced. A mounted
+directory that uid 10001 cannot write makes startup fail when fileslop creates
+its namespace directories.
+
+The image runs as uid and gid 10001. Use Docker's `--user` option when the host
+directory belongs to another account:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --publish 127.0.0.1:3000:3000 \
+  --env BASE_URL=http://localhost:3000 \
+  --mount type=bind,source="$PWD/storage",target=/storage \
+  ghcr.io/adwinying/fileslop:latest
+```
+
+Pass the Cloudflare variables described below to run provisioning and the
+managed tunnel. Do not publish the container port in that mode. The write paths
+must only be reachable through the tailnet, as required by ADR-0001.
+
 ## Cloudflare setup
 
 fileslop can provision its own Cloudflare Tunnel, DNS record, Access

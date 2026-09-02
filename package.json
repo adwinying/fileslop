@@ -6,7 +6,8 @@
     "dev": "bun run --watch src/index.ts",
     "lint": "tsc --noEmit && eslint . --report-unused-disable-directives --max-warnings 0",
     "verify:external": "bun run src/verify-cli.ts external",
-    "verify:internal": "bun run src/verify-cli.ts internal"
+    "verify:internal": "bun run src/verify-cli.ts internal",
+    "verify:round-trip": "bun run src/verify-cli.ts round-trip"
   },
   "dependencies": {
     "@elysiajs/cron": "^1.4.2",

@@ -66,7 +66,7 @@ Preflight cannot observe reachability. It sees what Cloudflare has been told, no
 
 ### Verify
 
-The check that runs from outside the process, after deployment, asking whether the observed *behaviour* is correct: `/r/` challenges for Access, `/p/` does not, `/w/` does not resolve, and the origin is not reachable except through the tunnel.
+The checks that run from outside the process, after deployment, asking whether the observed *behaviour* is correct: `/r/` challenges for Access, `/p/` does not, `/w/` does not resolve, the origin is not reachable except through the tunnel, and a real file survives an upload-download round trip through the origin.
 
 Verify needs a vantage point Preflight does not have. The origin-reachability check in particular is meaningless from inside the process, and is the only check that catches an origin exposed alongside a correct Cloudflare configuration.
 
