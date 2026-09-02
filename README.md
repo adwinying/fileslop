@@ -2,6 +2,65 @@
 
 A self-hosted file drop for agents, built with Bun and Elysia.
 
+## HTTP API
+
+fileslop has four namespaces. `p` and `r` keep files indefinitely. `pt` and
+`rt` delete files after `TEMP_TTL`. Reads from `r` and `rt` require Cloudflare
+Access authentication when Cloudflare mode is enabled.
+
+| Method | Path              | Purpose                              |
+| ------ | ----------------- | ------------------------------------ |
+| `POST` | `/w/p`            | Upload a permanent public file.      |
+| `PUT`  | `/w/p/:filename`  | Replace a permanent public file.     |
+| `GET`  | `/p/:filename`    | Read a permanent public file.        |
+| `POST` | `/w/pt`           | Upload a temporary public file.      |
+| `PUT`  | `/w/pt/:filename` | Replace a temporary public file.     |
+| `GET`  | `/pt/:filename`   | Read a temporary public file.        |
+| `POST` | `/w/r`            | Upload a permanent restricted file.  |
+| `PUT`  | `/w/r/:filename`  | Replace a permanent restricted file. |
+| `GET`  | `/r/:filename`    | Read a permanent restricted file.    |
+| `POST` | `/w/rt`           | Upload a temporary restricted file.  |
+| `PUT`  | `/w/rt/:filename` | Replace a temporary restricted file. |
+| `GET`  | `/rt/:filename`   | Read a temporary restricted file.    |
+
+`POST` and `PUT` expect `multipart/form-data` with one part named `file`. A
+successful write returns the file URL as plain text, with a trailing newline.
+`POST` mints a 7-character alphanumeric slug. The original filename is dropped,
+but a 1-10 character alphanumeric extension is kept and lowercased. `.tar.gz`,
+`.tar.bz2`, `.tar.xz`, and `.tar.zst` are also kept. Other suffixes produce a
+filename with no extension.
+
+| Status | Trigger                                                                     |
+| ------ | --------------------------------------------------------------------------- |
+| `200`  | A replacement or read succeeds.                                             |
+| `201`  | An upload succeeds.                                                         |
+| `404`  | A route, file, or target filename is missing, expired, or malformed.        |
+| `409`  | The replacement upload's extension differs from the target's extension.     |
+| `413`  | The uploaded file exceeds `MAX_UPLOAD_BYTES`.                               |
+| `422`  | The multipart body is invalid, including a missing or unexpected file part. |
+| `500`  | An unexpected storage or server error occurs.                               |
+
+Every response includes `Cache-Control: no-store`.
+
+Upload a file through the tailnet write origin, then fetch its public URL:
+
+```bash
+url=$(curl --fail --silent --show-error \
+  --form file=@./example.txt \
+  http://fileslop.tailnet:3000/w/p)
+curl --fail --output example.downloaded.txt "$url"
+```
+
+Scripts reading `r` or `rt` through Cloudflare need an Access service token.
+Browser SSO does not authenticate `curl`:
+
+```bash
+curl \
+  --header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+  https://files.example/r/Ab3dE9z.txt
+```
+
 ## Container deployment
 
 Pull the current image from GHCR:
@@ -55,6 +114,28 @@ docker run --rm \
   --mount type=bind,source="$PWD/storage",target=/storage \
   ghcr.io/adwinying/fileslop:latest
 ```
+
+### Docker Compose
+
+This Cloudflare tunnel deployment publishes no container port:
+
+```yaml
+services:
+  fileslop:
+    image: ghcr.io/adwinying/fileslop:latest
+    restart: unless-stopped
+    environment:
+      BASE_URL: https://files.example
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      ACCESS_EMAILS: operator@example.com
+    volumes:
+      - ./storage:/storage
+```
+
+Create `./storage` and make it writable by uid and gid 10001 before running
+`docker compose up -d`. The port stays unpublished because anything that
+reaches it can write. Connect the container to your tailnet without exposing
+the listening port beyond it.
 
 Pass the Cloudflare variables described below to run provisioning and the
 managed tunnel. Do not publish the container port in that mode. The write paths
@@ -153,6 +234,27 @@ export ACCESS_IDPS='[{"config":{"client_id":"<your client id>","client_secret":"
 
 To enable both, put both objects in the same JSON array. fileslop prefixes each
 name with `fileslop:<hostname>:idp:` when it creates the provider.
+
+## Limitations
+
+- fileslop has no application-level authentication. Anything that reaches the
+  process can write, so the listening port must never leave the tailnet. See
+  [ADR-0001](docs/adr/0001-no-application-level-auth.md).
+- The origin must be unreachable except through the tunnel. Direct origin
+  access bypasses Cloudflare Access entirely. See
+  [ADR-0001](docs/adr/0001-no-application-level-auth.md).
+- fileslop serves files exactly as uploaded and derives `Content-Type` from the
+  extension. An uploaded `.html` or `.svg` file can run stored XSS on the
+  origin. Only operator-controlled agents should write, and the origin should
+  host nothing else. See
+  [ADR-0002](docs/adr/0002-serve-stored-files-as-is.md).
+- There is no listing, delete, or metadata endpoint.
+- TTL is measured from the file's mtime without sidecar metadata. Replacing a
+  temporary file restarts its lifetime.
+- Expired files become unreadable immediately. The hourly sweeper may take up
+  to one hour to reclaim their disk space.
+- Public namespaces have no access control. Anyone with a URL can read the
+  file, and the slug is the only barrier to guessing its URL.
 
 ## Development
 
